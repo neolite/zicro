@@ -3,7 +3,7 @@
   "autosave": false,
   "lsp": {
     "enabled": true,
-    "change_debounce_ms": 32,
-    "did_save_debounce_ms": 64
+    "change_debounce_ms": 16,
+    "did_save_debounce_ms": 32
   }
 }
