@@ -44,6 +44,8 @@ const top_bar_rows: usize = 1;
 const footer_rows: usize = 2;
 const max_project_files: usize = 120_000;
 const max_file_index_bytes: usize = 32 * 1024 * 1024;
+const max_project_search_results: usize = 256;
+const max_project_search_bytes: usize = 2 * 1024 * 1024;
 
 const FileFrecency = struct {
     visits: u32 = 0,
@@ -419,7 +421,12 @@ pub const App = struct {
                 self.closeLspPanel();
             },
             .project_search => {
-                self.closeLspPanel();
+                if (self.ui.project_search_results.items.len == 0) {
+                    self.closeLspPanel();
+                    return;
+                }
+                const index = @min(self.ui.lsp_panel_selected, self.ui.project_search_results.items.len - 1);
+                try self.openProjectSearchResult(index);
             },
         }
     }
@@ -1179,6 +1186,14 @@ pub const App = struct {
                     try self.setStatus("Debug panel: off");
                 }
             },
+            .toggle_line_numbers => {
+                self.ui.show_line_numbers = !self.ui.show_line_numbers;
+                if (self.ui.show_line_numbers) {
+                    try self.setStatus("Line numbers: on");
+                } else {
+                    try self.setStatus("Line numbers: off");
+                }
+            },
         }
     }
 
@@ -1403,6 +1418,11 @@ pub const App = struct {
                 self.ui.palette.selected += 1;
             },
             .enter => {
+                if (try self.tryJumpCurrentFileByQuery(self.ui.palette.query.items)) {
+                    self.ui.palette.active = false;
+                    return;
+                }
+
                 const matches = try self.paletteMatches(self.allocator);
                 defer matches.deinit();
 
@@ -1449,37 +1469,70 @@ pub const App = struct {
             .ctrl_shift => |ch| {
                 if (ch == 'p') self.ui.palette.active = false;
             },
+            .cmd => |ch| {
+                if (ch == 'p') self.ui.palette.active = false;
+            },
+            .cmd_shift => |ch| {
+                if (ch == 'p') self.ui.palette.active = false;
+            },
             else => {},
         }
     }
 
     fn handlePromptInput(self: *App, event: KeyEvent) !void {
         switch (event) {
-            .escape => self.ui.prompt.close(),
+            .escape => {
+                self.ui.prompt.close();
+                if (self.ui.lsp_panel_mode == .project_search) self.closeLspPanel();
+            },
             .backspace => {
                 if (self.ui.prompt.query.items.len > 0) {
                     const prev = utf8PrevBoundary(self.ui.prompt.query.items, self.ui.prompt.query.items.len);
                     self.ui.prompt.query.items.len = prev;
-                    try self.updateRegexPromptPreview();
+                    switch (self.ui.prompt.mode) {
+                        .project_search => try self.updateProjectSearchPreview(),
+                        else => try self.updateRegexPromptPreview(),
+                    }
                 }
             },
             .enter => try self.executePrompt(),
-            .up => try self.regexPrevFromPrompt(),
-            .down => try self.regexNextFromPrompt(),
+            .up => switch (self.ui.prompt.mode) {
+                .project_search => try self.projectSearchPrevFromPrompt(),
+                else => try self.regexPrevFromPrompt(),
+            },
+            .down => switch (self.ui.prompt.mode) {
+                .project_search => try self.projectSearchNextFromPrompt(),
+                else => try self.regexNextFromPrompt(),
+            },
             .char => |ch| {
                 if (std.ascii.isPrint(ch) or ch == ' ') {
                     try self.ui.prompt.query.append(ch);
-                    try self.updateRegexPromptPreview();
+                    switch (self.ui.prompt.mode) {
+                        .project_search => try self.updateProjectSearchPreview(),
+                        else => try self.updateRegexPromptPreview(),
+                    }
                 }
             },
             .text => |text| {
                 if (text.len > 0) {
                     try self.ui.prompt.query.appendSlice(text);
-                    try self.updateRegexPromptPreview();
+                    switch (self.ui.prompt.mode) {
+                        .project_search => try self.updateProjectSearchPreview(),
+                        else => try self.updateRegexPromptPreview(),
+                    }
                 }
             },
             .ctrl => |ch| {
-                if (ch == 'g' or ch == 'f') self.ui.prompt.close();
+                if (ch == 'g' or ch == 'f') {
+                    self.ui.prompt.close();
+                    if (self.ui.lsp_panel_mode == .project_search) self.closeLspPanel();
+                }
+            },
+            .cmd => |ch| {
+                if (ch == 'g' or ch == 'f') {
+                    self.ui.prompt.close();
+                    if (self.ui.lsp_panel_mode == .project_search) self.closeLspPanel();
+                }
             },
             else => {},
         }
@@ -1491,11 +1544,188 @@ pub const App = struct {
         defer self.allocator.free(query);
         self.ui.prompt.close();
 
+        if (try self.tryJumpCurrentFileByQuery(query)) {
+            return;
+        }
+
         switch (mode) {
             .goto_line => try self.executeGotoLine(query),
             .regex_search => try self.executeRegexSearch(query),
-            .project_search => try self.executeRegexSearch(query),
+            .project_search => {
+                try self.executeProjectSearch(query);
+                self.ui.prompt.close();
+            },
         }
+    }
+
+    fn executeProjectSearch(self: *App, query: []const u8) !void {
+        const trimmed = std.mem.trim(u8, query, " \t");
+        if (trimmed.len == 0) {
+            try self.clearProjectSearchResults();
+            self.closeLspPanel();
+            try self.setStatus("Project search: empty query");
+            return;
+        }
+
+        const root = if (self.project_root) |r|
+            r
+        else blk: {
+            const discovered = try self.discoverProjectRoot();
+            self.project_root = discovered;
+            break :blk discovered;
+        };
+
+        try self.setProjectSearchQuery(trimmed);
+        try self.collectProjectSearchResults(root, trimmed);
+        if (self.ui.project_search_results.items.len == 0) {
+            self.closeLspPanel();
+            try self.setStatus("Project search: no matches");
+            return;
+        }
+
+        self.ui.lsp_panel_mode = .project_search;
+        self.ui.lsp_panel_selected = @min(self.ui.lsp_panel_selected, self.ui.project_search_results.items.len - 1);
+        try self.openProjectSearchResult(self.ui.lsp_panel_selected);
+    }
+
+    fn updateProjectSearchPreview(self: *App) !void {
+        if (!self.ui.prompt.active or self.ui.prompt.mode != .project_search) return;
+        try self.executeProjectSearch(self.ui.prompt.query.items);
+    }
+
+    fn projectSearchNextFromPrompt(self: *App) !void {
+        if (self.ui.project_search_results.items.len == 0) return;
+        self.ui.lsp_panel_mode = .project_search;
+        self.ui.lsp_panel_selected = @min(self.ui.lsp_panel_selected + 1, self.ui.project_search_results.items.len - 1);
+        try self.openProjectSearchResult(self.ui.lsp_panel_selected);
+    }
+
+    fn projectSearchPrevFromPrompt(self: *App) !void {
+        if (self.ui.project_search_results.items.len == 0) return;
+        self.ui.lsp_panel_mode = .project_search;
+        if (self.ui.lsp_panel_selected > 0) self.ui.lsp_panel_selected -= 1;
+        try self.openProjectSearchResult(self.ui.lsp_panel_selected);
+    }
+
+    fn setProjectSearchQuery(self: *App, query: []const u8) !void {
+        self.ui.project_search_query.clearRetainingCapacity();
+        try self.ui.project_search_query.appendSlice(query);
+    }
+
+    fn clearProjectSearchResults(self: *App) !void {
+        for (self.ui.project_search_results.items) |item| {
+            self.allocator.free(item.path);
+            self.allocator.free(item.text);
+        }
+        self.ui.project_search_results.clearRetainingCapacity();
+        self.ui.project_search_query.clearRetainingCapacity();
+    }
+
+    fn collectProjectSearchResults(self: *App, root: []const u8, query: []const u8) !void {
+        try self.clearProjectSearchResults();
+
+        var args = std.array_list.Managed([]const u8).init(self.allocator);
+        defer args.deinit();
+        try args.append("rg");
+        try args.append("--line-number");
+        try args.append("--column");
+        try args.append("--no-heading");
+        try args.append("--color");
+        try args.append("never");
+        try args.append("--hidden");
+        try args.append("--max-count");
+        try args.append("256");
+        try args.append("-g");
+        try args.append("!.git/");
+        try args.append("-g");
+        try args.append("!node_modules/");
+        try args.append("-g");
+        try args.append("!.zig-cache/");
+        try args.append("-g");
+        try args.append("!zig-out/");
+        try args.append("-g");
+        try args.append("!dist/");
+        try args.append("-g");
+        try args.append("!build/");
+        try args.append("-g");
+        try args.append("!target/");
+        if (try pathExists(self.allocator, root, ".zicroignore")) {
+            try args.append("--ignore-file");
+            try args.append(".zicroignore");
+        }
+        try args.append(query);
+        try args.append(".");
+
+        var child = std.process.Child.init(args.items, self.allocator);
+        child.cwd = root;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+        defer {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+        }
+
+        const stdout = child.stdout orelse return;
+        const bytes = try stdout.readToEndAlloc(self.allocator, max_project_search_bytes);
+        defer self.allocator.free(bytes);
+
+        var start: usize = 0;
+        while (start < bytes.len and self.ui.project_search_results.items.len < max_project_search_results) {
+            const nl = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
+            const line = bytes[start..nl];
+            try self.parseProjectSearchLine(root, line);
+            start = if (nl < bytes.len) nl + 1 else nl;
+        }
+    }
+
+    fn parseProjectSearchLine(self: *App, root: []const u8, line: []const u8) !void {
+        if (line.len == 0) return;
+        const first = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        const second_rel = std.mem.indexOfScalarPos(u8, line, first + 1, ':') orelse return;
+        const third_rel = std.mem.indexOfScalarPos(u8, line, second_rel + 1, ':') orelse return;
+
+        const rel_path = line[0..first];
+        const line_str = line[first + 1 .. second_rel];
+        const col_str = line[second_rel + 1 .. third_rel];
+        const text = line[third_rel + 1 ..];
+
+        const line_num = std.fmt.parseUnsigned(usize, line_str, 10) catch return;
+        const col_num = std.fmt.parseUnsigned(usize, col_str, 10) catch return;
+
+        const full_path = try std.fs.path.join(self.allocator, &.{ root, rel_path });
+        errdefer self.allocator.free(full_path);
+        const text_owned = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(text_owned);
+
+        try self.ui.project_search_results.append(.{
+            .path = full_path,
+            .line = line_num,
+            .column = col_num,
+            .text = text_owned,
+        });
+    }
+
+    fn openProjectSearchResult(self: *App, index: usize) !void {
+        if (index >= self.ui.project_search_results.items.len) return;
+        const item = self.ui.project_search_results.items[index];
+        const current_path = self.editor.file_path orelse "";
+        if (!std.mem.eql(u8, current_path, item.path)) {
+            if (self.editor.dirty and current_path.len > 0) {
+                try self.setStatus("Project search: save current file first");
+                return;
+            }
+            try self.openFilePath(item.path);
+        }
+
+        const line_index = if (item.line > 0) item.line - 1 else 0;
+        const col_index = if (item.column > 0) item.column - 1 else 0;
+        self.editor.cursor = self.editor.buffer.offsetFromLineCol(line_index, col_index);
+        self.centerCursorInViewport();
+        self.clearSelection();
+        self.editor.preferred_visual_col = null;
+        try self.setStatusFromPrefix("Search: ", item.text);
     }
 
     fn executeGotoLine(self: *App, query: []const u8) !void {
@@ -1520,6 +1750,38 @@ pub const App = struct {
         self.clearSelection();
         self.editor.preferred_visual_col = null;
         try self.setStatus("Moved");
+    }
+
+    fn tryJumpCurrentFileByQuery(self: *App, query: []const u8) !bool {
+        const trimmed = std.mem.trim(u8, query, " \t");
+        if (trimmed.len < 2 or trimmed[0] != ':') return false;
+
+        const line_part_end = std.mem.indexOfScalarPos(u8, trimmed, 1, ':') orelse trimmed.len;
+        const line_part = std.mem.trim(u8, trimmed[1..line_part_end], " \t");
+        if (line_part.len == 0) return false;
+        const line_1_based = std.fmt.parseUnsigned(usize, line_part, 10) catch return false;
+        if (line_1_based == 0) {
+            try self.setStatus("Goto line: line starts at 1");
+            return true;
+        }
+
+        var col_1_based: usize = 1;
+        if (line_part_end < trimmed.len) {
+            const col_part = std.mem.trim(u8, trimmed[line_part_end + 1 ..], " \t");
+            if (col_part.len > 0) {
+                col_1_based = std.fmt.parseUnsigned(usize, col_part, 10) catch 1;
+                if (col_1_based == 0) col_1_based = 1;
+            }
+        }
+
+        const line_index = @min(line_1_based - 1, self.editor.buffer.lineCount() - 1);
+        const col_index = col_1_based - 1;
+        self.editor.cursor = self.editor.buffer.offsetFromLineCol(line_index, col_index);
+        self.centerCursorInViewport();
+        self.clearSelection();
+        self.editor.preferred_visual_col = null;
+        try self.setStatus("Moved");
+        return true;
     }
 
     fn executeRegexSearch(self: *App, query: []const u8) !void {

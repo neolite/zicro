@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 
 pub const KeyEvent = union(enum) {
@@ -6,6 +7,8 @@ pub const KeyEvent = union(enum) {
     text: []const u8,
     ctrl: u8,
     ctrl_shift: u8,
+    cmd: u8,
+    cmd_shift: u8,
     enter,
     tab,
     escape,
@@ -180,6 +183,31 @@ fn mapKey(key: vaxis.Key) ?KeyEvent {
             else
                 raw;
             return KeyEvent{ .ctrl_shift = normalized };
+        }
+    }
+
+    const is_macos = comptime builtin.target.os.tag == .macos;
+    if (is_macos and !key.mods.ctrl and !key.mods.alt and (key.mods.super or key.mods.meta)) {
+        if (key.mods.shift) {
+            if (key.codepoint < 128) {
+                const raw: u8 = @intCast(key.codepoint);
+                const normalized = if (raw >= 1 and raw <= 26)
+                    @as(u8, raw + 'a' - 1)
+                else if (std.ascii.isAlphabetic(raw))
+                    std.ascii.toLower(raw)
+                else
+                    raw;
+                return KeyEvent{ .cmd_shift = normalized };
+            }
+        } else {
+            if (key.codepoint < 128) {
+                const raw: u8 = @intCast(key.codepoint);
+                const normalized = if (std.ascii.isAlphabetic(raw))
+                    std.ascii.toLower(raw)
+                else
+                    raw;
+                return KeyEvent{ .cmd = normalized };
+            }
         }
     }
 

@@ -107,10 +107,17 @@ pub fn renderLine(
     const limit = byteLimitForDisplayWidth(line, content_width, terminal_tab_width);
     const clipped = line[0..limit];
 
-    if (has_diagnostic) {
-        try out.writer().print("\x1b[31m!{d:3} \x1b[0m", .{line_index + 1});
+    if (self.ui.show_line_numbers) {
+        if (has_diagnostic) {
+            try out.writer().print("\x1b[31m!{d:3} \x1b[0m", .{line_index + 1});
+        } else {
+            try out.writer().print("\x1b[90m{d:4} \x1b[0m", .{line_index + 1});
+        }
     } else {
-        try out.writer().print("\x1b[90m{d:4} \x1b[0m", .{line_index + 1});
+        var i: usize = 0;
+        while (i < line_gutter_cols) : (i += 1) {
+            try out.append(' ');
+        }
     }
 
     const Overlay = struct {
@@ -530,9 +537,26 @@ fn renderLspPanel(
             while (row < rows) : (row += 1) {
                 const selected = row == @min(self.ui.lsp_panel_selected, results.len - 1);
                 try out.writer().print("\x1b[{d};{d}H\x1b[K", .{ start_row + row, start_col });
-                if (selected) try out.appendSlice("\x1b[48;5;240m\x1b[97m");
+                if (selected) {
+                    try out.appendSlice("\x1b[48;5;240m\x1b[97m");
+                } else {
+                    try out.appendSlice("\x1b[48;5;235m\x1b[37m");
+                }
                 const item = results[row];
-                try out.writer().print("{s}:{d}:{d} {s}", .{ item.path, item.line, item.column, item.text });
+                const rel_path = if (self.project_root) |root|
+                    if (std.mem.startsWith(u8, item.path, root) and item.path.len > root.len + 1)
+                        item.path[root.len + 1 ..]
+                    else
+                        item.path
+                else
+                    item.path;
+                try out.appendSlice("\x1b[96m");
+                const path_limit = byteLimitForDisplayWidth(rel_path, panel_width / 2, terminal_tab_width);
+                try out.appendSlice(rel_path[0..path_limit]);
+                try out.appendSlice("\x1b[37m");
+                try out.writer().print(":{d}:{d} ", .{ item.line, item.column });
+                const text_limit = byteLimitForDisplayWidth(item.text, panel_width / 2, terminal_tab_width);
+                try out.appendSlice(item.text[0..text_limit]);
                 try out.appendSlice("\x1b[0m");
             }
         },

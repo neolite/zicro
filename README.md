@@ -108,6 +108,7 @@ git push origin v0.2.0
 - `Ctrl+Shift+P`: command palette
 - `Ctrl+G`: goto line
 - `Ctrl+F`: regex search prompt
+- `Ctrl+Shift+F`: project content search (rg)
 - `Ctrl+/`: toggle comment for line/selection
 - `Ctrl+Z`: undo
 - `Ctrl+Y`: redo
@@ -117,11 +118,17 @@ git push origin v0.2.0
 - `Ctrl+R`: LSP references panel
 - `Ctrl+O`: jump back after LSP jump
 - `Ctrl+W`: toggle info/debug panel
+- `Ctrl+L`: toggle line numbers
 - `Tab`: accept selected completion item when completion popup is open
 - Arrows/Home/End/PageUp/PageDown: navigation
 - `Shift+Arrows` + `Shift+Home/End/PageUp/PageDown`: linear selection
 - `Option+Arrows`: block selection
 - `Ctrl+Left/Right`: word navigation (if terminal sends modifier CSI)
+
+macOS aliases (native-style):
+- `Cmd+P` file finder, `Cmd+Shift+P` command palette
+- `Cmd+F` regex search, `Cmd+Shift+F` project search
+- `Cmd+S` save, `Cmd+Q` quit, `Cmd+C/X/V` copy/cut/paste
 
 ## Config
 

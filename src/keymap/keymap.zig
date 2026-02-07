@@ -45,6 +45,7 @@ pub const Command = enum {
     lsp_references,
     lsp_jump_back,
     toggle_debug_panel,
+    toggle_line_numbers,
 };
 
 pub fn mapEditor(event: KeyEvent) ?Command {
@@ -93,12 +94,33 @@ pub fn mapEditor(event: KeyEvent) ?Command {
             'r' => .lsp_references,
             'o' => .lsp_jump_back,
             'w' => .toggle_debug_panel,
+            'l' => .toggle_line_numbers,
             'b' => .move_left,
             'a' => .move_home,
             'e' => .move_end,
             else => null,
         },
         .ctrl_shift => |ch| switch (ch) {
+            'p' => .show_command_palette,
+            'f' => .project_search,
+            else => null,
+        },
+        .cmd => |ch| switch (ch) {
+            'q' => .quit,
+            'c' => .copy,
+            'v' => .paste,
+            'x' => .cut,
+            's' => .save,
+            'p' => .show_file_finder,
+            'g' => .goto_line,
+            'f' => .regex_search,
+            'z' => .undo,
+            'y' => .redo,
+            'w' => .toggle_debug_panel,
+            'l' => .toggle_line_numbers,
+            else => null,
+        },
+        .cmd_shift => |ch| switch (ch) {
             'p' => .show_command_palette,
             'f' => .project_search,
             else => null,
