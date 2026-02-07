@@ -13,7 +13,6 @@ const c = @cImport({
     @cInclude("regex.h");
 });
 
-const lsp_change_delay_ns: i128 = 70 * std.time.ns_per_ms;
 const idle_sleep_ns: u64 = 1 * std.time.ns_per_ms;
 const terminal_tab_width: usize = 8;
 const line_gutter_cols: usize = 5;
@@ -158,6 +157,7 @@ pub const App = struct {
     force_full_lsp_sync: bool,
     prompt: PromptState,
     preferred_visual_col: ?usize,
+    lsp_change_delay_ns: i128,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, file_path_opt: ?[]const u8) !App {
         const file_bytes = if (file_path_opt) |path|
@@ -194,7 +194,10 @@ pub const App = struct {
             .force_full_lsp_sync = false,
             .prompt = PromptState.init(allocator),
             .preferred_visual_col = null,
+            .lsp_change_delay_ns = @as(i128, @intCast(config.lsp_change_debounce_ms)) * std.time.ns_per_ms,
         };
+
+        app.lsp.setDidSavePulseDebounceMs(config.lsp_did_save_debounce_ms);
 
         try app.setStatus("Ctrl+S save | Ctrl+Q quit | Ctrl+P palette | Ctrl+Z/Ctrl+Y undo/redo");
 
@@ -1199,7 +1202,7 @@ pub const App = struct {
     fn queueDidChange(self: *App) void {
         if (!self.lsp.enabled) return;
         self.pending_lsp_sync = true;
-        self.next_lsp_flush_ns = std.time.nanoTimestamp() + lsp_change_delay_ns;
+        self.next_lsp_flush_ns = std.time.nanoTimestamp() + self.lsp_change_delay_ns;
     }
 
     fn flushPendingDidChange(self: *App, force: bool) !bool {

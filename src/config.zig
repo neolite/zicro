@@ -4,12 +4,16 @@ pub const Config = struct {
     tab_width: u8,
     autosave: bool,
     enable_lsp: bool,
+    lsp_change_debounce_ms: u16,
+    lsp_did_save_debounce_ms: u16,
 
     pub fn load(allocator: std.mem.Allocator, config_path_opt: ?[]const u8) !Config {
         var config = Config{
             .tab_width = 4,
             .autosave = false,
             .enable_lsp = true,
+            .lsp_change_debounce_ms = 32,
+            .lsp_did_save_debounce_ms = 64,
         };
 
         var path = config_path_opt;
@@ -26,6 +30,8 @@ pub const Config = struct {
 
         const RawLsp = struct {
             enabled: ?bool = null,
+            change_debounce_ms: ?u16 = null,
+            did_save_debounce_ms: ?u16 = null,
         };
         const RawConfig = struct {
             tab_width: ?u8 = null,
@@ -49,6 +55,16 @@ pub const Config = struct {
         if (parsed.value.lsp) |lsp| {
             if (lsp.enabled) |value| {
                 config.enable_lsp = value;
+            }
+            if (lsp.change_debounce_ms) |value| {
+                if (value >= 1 and value <= 1000) {
+                    config.lsp_change_debounce_ms = value;
+                }
+            }
+            if (lsp.did_save_debounce_ms) |value| {
+                if (value >= 1 and value <= 1000) {
+                    config.lsp_did_save_debounce_ms = value;
+                }
             }
         }
 

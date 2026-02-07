@@ -87,10 +87,15 @@ Example:
   "tab_width": 4,
   "autosave": false,
   "lsp": {
-    "enabled": true
+    "enabled": true,
+    "change_debounce_ms": 32,
+    "did_save_debounce_ms": 64
   }
 }
 ```
+
+`lsp.change_debounce_ms`: delay before flushing `didChange` (1..1000, default `32`).
+`lsp.did_save_debounce_ms`: debounce for TypeScript `didSave` pulse on typing (1..1000, default `64`).
 
 ## LSP setup
 

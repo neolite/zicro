@@ -39,6 +39,8 @@ pub const Client = struct {
     diagnostics_request_id: ?u64,
     change_mode: ChangeMode,
     supports_pull_diagnostics: bool,
+    did_save_pulse_interval_ns: i128,
+    next_did_save_pulse_ns: i128,
     bootstrap_saved: bool,
     pending_open_text: ?[]u8,
     recv_buffer: std.array_list.Managed(u8),
@@ -65,6 +67,8 @@ pub const Client = struct {
             .diagnostics_request_id = null,
             .change_mode = .full,
             .supports_pull_diagnostics = true,
+            .did_save_pulse_interval_ns = 64 * std.time.ns_per_ms,
+            .next_did_save_pulse_ns = 0,
             .bootstrap_saved = false,
             .pending_open_text = null,
             .recv_buffer = std.array_list.Managed(u8).init(allocator),
@@ -100,6 +104,7 @@ pub const Client = struct {
         self.diagnostics_request_id = null;
         self.change_mode = .full;
         self.supports_pull_diagnostics = true;
+        self.next_did_save_pulse_ns = 0;
         self.bootstrap_saved = false;
         self.server_name = "off";
         self.recv_buffer.clearRetainingCapacity();
@@ -136,6 +141,7 @@ pub const Client = struct {
         self.session_ready = false;
         self.change_mode = .full;
         self.supports_pull_diagnostics = true;
+        self.next_did_save_pulse_ns = 0;
         self.server_name = server.name;
         self.version = 1;
 
@@ -207,6 +213,11 @@ pub const Client = struct {
         _ = self.setDiagnostics(0, null, "", &[_]usize{});
     }
 
+    pub fn setDidSavePulseDebounceMs(self: *Client, debounce_ms: u16) void {
+        self.did_save_pulse_interval_ns = @as(i128, @intCast(debounce_ms)) * std.time.ns_per_ms;
+        self.next_did_save_pulse_ns = 0;
+    }
+
     pub fn didOpen(self: *Client, text: []const u8) !void {
         if (!self.enabled) return;
         const uri = self.document_uri orelse return;
@@ -246,6 +257,7 @@ pub const Client = struct {
         };
 
         try self.sendNotification("textDocument/didChange", params);
+        try self.maybeSendDidSavePulse();
         try self.requestDiagnostics();
     }
 
@@ -278,6 +290,7 @@ pub const Client = struct {
         };
 
         try self.sendNotification("textDocument/didChange", params);
+        try self.maybeSendDidSavePulse();
         try self.requestDiagnostics();
     }
 
@@ -289,7 +302,20 @@ pub const Client = struct {
         if (!self.enabled) return;
         if (!self.session_ready) return;
         try self.sendDidSaveNotification();
+        self.next_did_save_pulse_ns = std.time.nanoTimestamp() + self.did_save_pulse_interval_ns;
         try self.requestDiagnostics();
+    }
+
+    fn maybeSendDidSavePulse(self: *Client) !void {
+        if (!self.enabled or !self.session_ready) return;
+        if (self.did_save_pulse_interval_ns <= 0) return;
+        if (!std.mem.eql(u8, self.server_name, "typescript")) return;
+
+        const now = std.time.nanoTimestamp();
+        if (now < self.next_did_save_pulse_ns) return;
+
+        self.next_did_save_pulse_ns = now + self.did_save_pulse_interval_ns;
+        try self.sendDidSaveNotification();
     }
 
     fn sendInitialize(self: *Client) !void {
