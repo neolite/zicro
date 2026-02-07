@@ -156,12 +156,35 @@ Example:
       "tooltip_max_width": 72,
       "tooltip_max_rows": 10
     },
+    "zig": {
+      "enabled": true,
+      "command": "zls",
+      "args": [],
+      "root_markers": ["build.zig", "build.zig.zon", ".git"]
+    },
     "typescript": {
       "mode": "auto",
       "command": "npx",
       "args": ["tsgo", "--lsp", "-stdio"],
       "root_markers": ["package.json", "tsconfig.json", ".git"]
-    }
+    },
+    "adapters": [
+      {
+        "name": "typescript-tsgo",
+        "language": "typescript",
+        "enabled": true,
+        "priority": 220
+      },
+      {
+        "name": "zig-alt",
+        "language": "zig",
+        "command": "zls",
+        "args": [],
+        "file_extensions": [".zig"],
+        "root_markers": ["build.zig", ".git"],
+        "priority": 90
+      }
+    ]
   }
 }
 ```
@@ -183,6 +206,16 @@ Example:
 `lsp.typescript.mode`: `auto | tsls | tsgo` (default `auto`).
 `lsp.typescript.command` + `args`: explicit TS LSP command override.
 `lsp.typescript.root_markers`: override project root detection markers for TS files.
+`lsp.zig.enabled`: optional legacy toggle for Zig LSP adapter (`true | false`).
+`lsp.zig.command` + `args`: optional legacy override for builtin Zig adapter command.
+`lsp.zig.root_markers`: optional legacy override for Zig root detection.
+`lsp.adapters`: ordered custom adapter list. If `name` matches builtin adapter (`zig-zls`, `typescript-tsgo`, `typescript-npx-tsgo`, `typescript-tsls`, `bash-language-server`) it overrides it; otherwise adds a new adapter.
+`lsp.adapters[].language`: LSP `languageId` used in `didOpen`.
+`lsp.adapters[].priority`: candidate priority (`-1000..1000`), higher starts first.
+`lsp.adapters[].enabled`: disable/enable adapter without removing config.
+`lsp.adapters[].command` + `args`: server command for custom or overridden adapter.
+`lsp.adapters[].file_extensions`: file matching list (e.g. `[".ts",".tsx"]`) for custom adapters.
+`lsp.adapters[].root_markers`: optional root markers for custom/overridden adapter.
 
 ## LSP setup
 

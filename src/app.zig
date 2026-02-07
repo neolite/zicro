@@ -93,7 +93,7 @@ pub const App = struct {
         if (config.enable_lsp and app.editor.file_path != null) {
             app.lsp_state.client.startForFile(app.editor.file_path.?, config) catch |err| switch (err) {
                 error.FileTooBig => try app.setStatus("LSP disabled: file too large for didOpen sync"),
-                error.LspServerUnavailable => try app.setStatus("LSP disabled: no matching server (tried tsgo/tsls for TS)"),
+                error.LspServerUnavailable => try app.setStatus("LSP disabled: no matching adapter or server unavailable"),
                 else => try app.setStatus("LSP disabled: server not found or failed to spawn"),
             };
         }
@@ -1547,7 +1547,7 @@ pub const App = struct {
                 if (self.editor.file_path) |path| {
                     self.lsp_state.client.startForFile(path, self.config) catch |err| switch (err) {
                         error.LspServerUnavailable => {
-                            try self.setStatus("LSP restart failed: no matching server");
+                            try self.setStatus("LSP restart failed: no matching adapter");
                             return;
                         },
                         else => {

@@ -5,9 +5,7 @@ const Config = @import("../config.zig").Config;
 const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
 const diagnostics_request_timeout_ns: i128 = 1500 * std.time.ns_per_ms;
 const max_payloads_per_poll: usize = 24;
-const tsgo_command = [_][]const u8{ "tsgo", "--lsp", "-stdio" };
-const npx_tsgo_command = [_][]const u8{ "npx", "tsgo", "--lsp", "-stdio" };
-const tsls_command = [_][]const u8{ "typescript-language-server", "--stdio" };
+const fallback_root_markers = [_][]const u8{".git"};
 
 pub const DiagnosticsSnapshot = struct {
     count: usize,
@@ -68,6 +66,21 @@ pub const CapabilitiesSnapshot = struct {
 const ChangeMode = enum {
     full,
     incremental,
+};
+
+const StartKind = enum {
+    command,
+    tsgo_via_node,
+};
+
+const StartCandidate = struct {
+    name: []const u8,
+    language_id: []const u8,
+    kind: StartKind,
+    command: []const u8,
+    args: []const []const u8,
+    root_markers: []const []const u8,
+    priority: i32,
 };
 
 pub const IncrementalChange = struct {
@@ -248,47 +261,40 @@ pub const Client = struct {
     pub fn startForFile(self: *Client, file_path: []const u8, config: *const Config) !void {
         self.stop();
 
-        const server = presets.forPath(file_path) orelse return;
-
         const abs_file = try absolutePath(self.allocator, file_path);
         defer self.allocator.free(abs_file);
 
-        const root_markers = if (std.mem.eql(u8, server.name, "typescript") and config.lsp_typescript.root_markers.items.len > 0)
-            config.lsp_typescript.root_markers.items
-        else
-            server.root_markers;
+        var candidates = try self.collectStartCandidates(file_path, config);
+        defer candidates.deinit();
 
-        const root_path = try findRootDir(self.allocator, abs_file, root_markers);
-        defer self.allocator.free(root_path);
-
-        if (std.mem.eql(u8, server.name, "typescript")) {
-            if (config.lsp_typescript.command) |command| {
-                const custom = try buildCommandView(self.allocator, command, config.lsp_typescript.args.items);
-                defer self.allocator.free(custom);
-                if (try self.tryStartServer(server.name, file_path, abs_file, root_path, custom)) return;
-                return error.LspServerUnavailable;
-            }
-
-            switch (config.lsp_typescript.mode) {
-                .tsgo => {
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsgo_command)) return;
-                    if (try self.tryStartTsgoViaNode(server.name, file_path, abs_file, root_path)) return;
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &npx_tsgo_command)) return;
-                },
-                .tsls => {
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsls_command)) return;
-                },
-                .auto => {
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsgo_command)) return;
-                    if (try self.tryStartTsgoViaNode(server.name, file_path, abs_file, root_path)) return;
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &npx_tsgo_command)) return;
-                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsls_command)) return;
-                },
-            }
-            return error.LspServerUnavailable;
+        if (candidates.items.len == 0) return error.LspServerUnavailable;
+        if (candidates.items.len > 1) {
+            std.mem.sort(StartCandidate, candidates.items, {}, compareStartCandidate);
         }
 
-        if (try self.tryStartServer(server.name, file_path, abs_file, root_path, server.command)) return;
+        for (candidates.items) |candidate| {
+            const root_path = try findRootDir(self.allocator, abs_file, candidate.root_markers);
+            defer self.allocator.free(root_path);
+
+            const started = switch (candidate.kind) {
+                .command => try self.tryStartServer(
+                    candidate.language_id,
+                    file_path,
+                    abs_file,
+                    root_path,
+                    candidate.command,
+                    candidate.args,
+                ),
+                .tsgo_via_node => try self.tryStartTsgoViaNode(
+                    candidate.language_id,
+                    file_path,
+                    abs_file,
+                    root_path,
+                ),
+            };
+            if (started) return;
+        }
+
         return error.LspServerUnavailable;
     }
 
@@ -298,9 +304,13 @@ pub const Client = struct {
         file_path: []const u8,
         abs_file: []const u8,
         root_path: []const u8,
-        command: []const []const u8,
+        command: []const u8,
+        args: []const []const u8,
     ) !bool {
-        const argv = try resolveArgv(self.allocator, root_path, command);
+        const command_view = try buildCommandView(self.allocator, command, args);
+        defer self.allocator.free(command_view);
+
+        const argv = try resolveArgv(self.allocator, root_path, command_view);
         defer freeArgv(self.allocator, argv);
 
         var child = std.process.Child.init(argv, self.allocator);
@@ -355,8 +365,239 @@ pub const Client = struct {
 
         if (std.fs.cwd().access(tsgo_script, .{})) |_| {} else |_| return false;
 
-        const cmd = [_][]const u8{ "node", tsgo_script, "--lsp", "-stdio" };
-        return try self.tryStartServer(server_name, file_path, abs_file, root_path, &cmd);
+        const args = [_][]const u8{ tsgo_script, "--lsp", "-stdio" };
+        return try self.tryStartServer(server_name, file_path, abs_file, root_path, "node", &args);
+    }
+
+    fn collectStartCandidates(
+        self: *Client,
+        file_path: []const u8,
+        config: *const Config,
+    ) !std.array_list.Managed(StartCandidate) {
+        var candidates = std.array_list.Managed(StartCandidate).init(self.allocator);
+        errdefer candidates.deinit();
+
+        const language = presets.languageForPath(file_path) orelse return candidates;
+        const language_roots = presets.rootMarkersForLanguage(language) orelse &fallback_root_markers;
+
+        const is_typescript = std.mem.eql(u8, language, "typescript");
+        if (is_typescript) {
+            if (config.lsp_typescript.command) |command| {
+                try candidates.append(.{
+                    .name = "typescript-custom",
+                    .language_id = "typescript",
+                    .kind = .command,
+                    .command = command,
+                    .args = config.lsp_typescript.args.items,
+                    .root_markers = if (config.lsp_typescript.root_markers.items.len > 0)
+                        config.lsp_typescript.root_markers.items
+                    else
+                        language_roots,
+                    .priority = 300,
+                });
+            } else {
+                const default_presets = presets.defaults();
+                for (default_presets) |preset| {
+                    if (!presets.matchesPath(preset, file_path)) continue;
+                    if (!allowTypescriptPreset(config, preset.name)) continue;
+
+                    const roots = if (config.lsp_typescript.root_markers.items.len > 0)
+                        config.lsp_typescript.root_markers.items
+                    else
+                        preset.root_markers;
+
+                    try candidates.append(.{
+                        .name = preset.name,
+                        .language_id = preset.language_id,
+                        .kind = .command,
+                        .command = preset.command,
+                        .args = preset.args,
+                        .root_markers = roots,
+                        .priority = preset.priority,
+                    });
+                }
+
+                if (config.lsp_typescript.mode != .tsls) {
+                    try candidates.append(.{
+                        .name = "typescript-node-tsgo",
+                        .language_id = "typescript",
+                        .kind = .tsgo_via_node,
+                        .command = "",
+                        .args = &.{},
+                        .root_markers = if (config.lsp_typescript.root_markers.items.len > 0)
+                            config.lsp_typescript.root_markers.items
+                        else
+                            language_roots,
+                        .priority = 115,
+                    });
+                }
+            }
+        } else {
+            const default_presets = presets.defaults();
+            for (default_presets) |preset| {
+                if (!presets.matchesPath(preset, file_path)) continue;
+                try candidates.append(.{
+                    .name = preset.name,
+                    .language_id = preset.language_id,
+                    .kind = .command,
+                    .command = preset.command,
+                    .args = preset.args,
+                    .root_markers = preset.root_markers,
+                    .priority = preset.priority,
+                });
+            }
+        }
+
+        if (std.mem.eql(u8, language, "zig")) {
+            self.applyLegacyZigConfig(&candidates, config);
+        }
+
+        try self.applyAdapterOverrides(&candidates, file_path, config);
+        return candidates;
+    }
+
+    fn allowTypescriptPreset(config: *const Config, preset_name: []const u8) bool {
+        return switch (config.lsp_typescript.mode) {
+            .auto => std.mem.eql(u8, preset_name, "typescript-tsgo") or
+                std.mem.eql(u8, preset_name, "typescript-npx-tsgo") or
+                std.mem.eql(u8, preset_name, "typescript-tsls"),
+            .tsgo => std.mem.eql(u8, preset_name, "typescript-tsgo") or
+                std.mem.eql(u8, preset_name, "typescript-npx-tsgo"),
+            .tsls => std.mem.eql(u8, preset_name, "typescript-tsls"),
+        };
+    }
+
+    fn applyLegacyZigConfig(
+        self: *Client,
+        candidates: *std.array_list.Managed(StartCandidate),
+        config: *const Config,
+    ) void {
+        _ = self;
+
+        if (config.lsp_zig.enabled) |enabled| {
+            if (!enabled) {
+                removeLanguageCandidates(candidates, "zig");
+                return;
+            }
+        }
+
+        var index: usize = 0;
+        while (index < candidates.items.len) : (index += 1) {
+            var candidate = &candidates.items[index];
+            if (!std.mem.eql(u8, candidate.language_id, "zig")) continue;
+            if (!std.mem.eql(u8, candidate.name, "zig-zls")) continue;
+
+            if (config.lsp_zig.command) |command| {
+                candidate.command = command;
+                candidate.args = config.lsp_zig.args.items;
+                candidate.kind = .command;
+            } else if (config.lsp_zig.args.items.len > 0) {
+                candidate.args = config.lsp_zig.args.items;
+            }
+
+            if (config.lsp_zig.root_markers.items.len > 0) {
+                candidate.root_markers = config.lsp_zig.root_markers.items;
+            }
+        }
+    }
+
+    fn applyAdapterOverrides(
+        self: *Client,
+        candidates: *std.array_list.Managed(StartCandidate),
+        file_path: []const u8,
+        config: *const Config,
+    ) !void {
+        _ = self;
+        const ext = std.fs.path.extension(file_path);
+
+        for (config.lsp_adapters.items) |adapter| {
+            var found = false;
+            var index: usize = 0;
+            while (index < candidates.items.len) : (index += 1) {
+                if (!std.mem.eql(u8, candidates.items[index].name, adapter.name)) continue;
+
+                found = true;
+                if (!adapter.enabled) {
+                    _ = candidates.orderedRemove(index);
+                } else {
+                    var candidate = &candidates.items[index];
+                    candidate.language_id = adapter.language;
+                    candidate.kind = .command;
+                    if (adapter.command) |command| {
+                        candidate.command = command;
+                        candidate.args = adapter.args.items;
+                    } else if (adapter.args.items.len > 0) {
+                        candidate.args = adapter.args.items;
+                    }
+                    if (adapter.root_markers.items.len > 0) {
+                        candidate.root_markers = adapter.root_markers.items;
+                    }
+                    if (adapter.priority != 0) {
+                        candidate.priority = adapter.priority;
+                    }
+                }
+                break;
+            }
+            if (found) continue;
+
+            if (!adapter.enabled) continue;
+            if (!adapterAppliesToExtension(adapter.file_extensions.items, adapter.language, ext)) continue;
+            const command = adapter.command orelse continue;
+            const root_markers = if (adapter.root_markers.items.len > 0)
+                adapter.root_markers.items
+            else
+                (presets.rootMarkersForLanguage(adapter.language) orelse &fallback_root_markers);
+
+            try candidates.append(.{
+                .name = adapter.name,
+                .language_id = adapter.language,
+                .kind = .command,
+                .command = command,
+                .args = adapter.args.items,
+                .root_markers = root_markers,
+                .priority = if (adapter.priority != 0) adapter.priority else 90,
+            });
+        }
+    }
+
+    fn adapterAppliesToExtension(
+        file_extensions: []const []const u8,
+        language: []const u8,
+        ext: []const u8,
+    ) bool {
+        if (ext.len == 0) return false;
+
+        if (file_extensions.len > 0) {
+            for (file_extensions) |entry| {
+                if (std.mem.eql(u8, entry, ext)) return true;
+            }
+            return false;
+        }
+
+        if (presets.extensionsForLanguage(language)) |default_exts| {
+            for (default_exts) |entry| {
+                if (std.mem.eql(u8, entry, ext)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn removeLanguageCandidates(candidates: *std.array_list.Managed(StartCandidate), language_id: []const u8) void {
+        var index: usize = 0;
+        while (index < candidates.items.len) {
+            if (std.mem.eql(u8, candidates.items[index].language_id, language_id)) {
+                _ = candidates.orderedRemove(index);
+                continue;
+            }
+            index += 1;
+        }
+    }
+
+    fn compareStartCandidate(_: void, lhs: StartCandidate, rhs: StartCandidate) bool {
+        if (lhs.priority == rhs.priority) {
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+        return lhs.priority > rhs.priority;
     }
 
     pub fn poll(self: *Client) !bool {
