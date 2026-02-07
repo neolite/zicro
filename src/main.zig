@@ -23,7 +23,7 @@ pub fn main() !void {
         if (args.config_path) |p| allocator.free(p);
     }
 
-    var config = try Config.load(allocator, args.config_path);
+    var config = try Config.load(allocator, args.config_path, args.file_path);
     defer config.deinit();
 
     var app = App.init(allocator, &config, args.file_path) catch |err| switch (err) {

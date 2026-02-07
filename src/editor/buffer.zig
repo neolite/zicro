@@ -1,4 +1,5 @@
 const std = @import("std");
+const layout = @import("../text/layout.zig");
 
 const Source = enum {
     original,
@@ -122,7 +123,7 @@ pub const Buffer = struct {
         var offset = @min(offset_input, self.total_len);
         while (offset > 0) {
             const ch = self.byteAt(offset) orelse break;
-            if (!isUtf8ContinuationByte(ch)) break;
+            if (!layout.isUtf8ContinuationByte(ch)) break;
             offset -= 1;
         }
         return offset;
@@ -135,7 +136,7 @@ pub const Buffer = struct {
         var pos = offset - 1;
         while (pos > 0) {
             const ch = self.byteAt(pos) orelse break;
-            if (!isUtf8ContinuationByte(ch)) break;
+            if (!layout.isUtf8ContinuationByte(ch)) break;
             pos -= 1;
         }
 
@@ -149,7 +150,7 @@ pub const Buffer = struct {
         var pos = offset + 1;
         while (pos < self.total_len) {
             const ch = self.byteAt(pos) orelse break;
-            if (!isUtf8ContinuationByte(ch)) break;
+            if (!layout.isUtf8ContinuationByte(ch)) break;
             pos += 1;
         }
 
@@ -160,14 +161,14 @@ pub const Buffer = struct {
         const offset = @min(offset_input, self.total_len);
         const pos = self.lineColFromOffset(offset);
         const line_start = self.line_starts.items[pos.line];
-        const tab_width = normalizedTabWidth(tab_width_input);
+        const tab_width = layout.normalizedTabWidth(tab_width_input);
 
         var cursor = line_start;
         var visual_col: usize = 0;
         while (cursor < offset) {
             const ch = self.byteAt(cursor) orelse break;
             if (ch == '\t') {
-                visual_col += tabStop(tab_width, visual_col);
+                visual_col += layout.tabStop(tab_width, visual_col);
                 cursor += 1;
                 continue;
             }
@@ -190,13 +191,13 @@ pub const Buffer = struct {
             self.line_starts.items[line_input + 1] - 1
         else
             self.total_len;
-        const tab_width = normalizedTabWidth(tab_width_input);
+        const tab_width = layout.normalizedTabWidth(tab_width_input);
 
         var cursor = start;
         var visual_col: usize = 0;
         while (cursor < line_end) {
             const ch = self.byteAt(cursor) orelse break;
-            const width = if (ch == '\t') tabStop(tab_width, visual_col) else 1;
+            const width = if (ch == '\t') layout.tabStop(tab_width, visual_col) else 1;
             if (visual_col + width > visual_col_input) break;
 
             visual_col += width;
@@ -577,18 +578,6 @@ fn freeEditStack(allocator: std.mem.Allocator, stack: *std.array_list.Managed(Ed
 
 fn isWordByte(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
-}
-
-fn isUtf8ContinuationByte(ch: u8) bool {
-    return (ch & 0b1100_0000) == 0b1000_0000;
-}
-
-fn normalizedTabWidth(tab_width_input: usize) usize {
-    return if (tab_width_input == 0) 4 else tab_width_input;
-}
-
-fn tabStop(tab_width: usize, col: usize) usize {
-    return tab_width - (col % tab_width);
 }
 
 test "piece table insert delete" {

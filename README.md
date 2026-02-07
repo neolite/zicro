@@ -19,7 +19,7 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
 - Search match is auto-centered in the viewport for better navigation UX.
 - LSP integration (`didOpen`, incremental/full `didChange`, `didSave`) for:
   - `zls`
-  - `typescript-language-server --stdio`
+  - TypeScript auto mode: `tsgo --lsp -stdio` -> `npx tsgo --lsp -stdio` -> `typescript-language-server --stdio`
   - `bash-language-server start`
 - Diagnostics UI:
   - top bar `ERR N | Lx: ...`
@@ -87,8 +87,10 @@ ZIG_BIN=/tmp/zig-aarch64-macos-0.15.2/zig ./scripts/build.sh
 
 `zicro` reads optional config from:
 
-1. `--config <path>`
-2. `./.zicro.json`
+1. defaults
+2. `./.zicro.json` (cwd)
+3. nearest repo-local `.zicro.json` (from edited file directory upward)
+4. `--config <path>` (highest priority)
 
 Example:
 
@@ -99,23 +101,39 @@ Example:
   "lsp": {
     "enabled": true,
     "change_debounce_ms": 32,
-    "did_save_debounce_ms": 64
+    "did_save_debounce_ms": 64,
+    "typescript": {
+      "mode": "auto",
+      "command": "npx",
+      "args": ["tsgo", "--lsp", "-stdio"],
+      "root_markers": ["package.json", "tsconfig.json", ".git"]
+    }
   }
 }
 ```
 
 `lsp.change_debounce_ms`: delay before flushing `didChange` (1..1000, default `32`).
 `lsp.did_save_debounce_ms`: debounce for TypeScript `didSave` pulse on typing (1..1000, default `64`).
+`lsp.typescript.mode`: `auto | tsls | tsgo` (default `auto`).
+`lsp.typescript.command` + `args`: explicit TS LSP command override.
+`lsp.typescript.root_markers`: override project root detection markers for TS files.
 
 ## LSP setup
 
 Install servers:
 
 - Zig: `zls`
-- JS/TS: `npm i -g typescript typescript-language-server`
+- JS/TS (classic): `npm i -g typescript typescript-language-server`
+- JS/TS (native preview): `npm i @typescript/native-preview`
 - Bash: `npm i -g bash-language-server`
 
-For JS/TS, `zicro` checks `./node_modules/.bin` first, then `PATH`.
+For JS/TS in `auto` mode, `zicro` tries:
+
+1. `tsgo --lsp -stdio`
+2. `npx tsgo --lsp -stdio`
+3. `typescript-language-server --stdio`
+
+`zicro` resolves binaries from project-local `node_modules/.bin` first, then `PATH`.
 
 ## Large files
 

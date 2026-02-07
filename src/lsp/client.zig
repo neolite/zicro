@@ -1,7 +1,12 @@
 const std = @import("std");
 const presets = @import("presets.zig");
+const Config = @import("../config.zig").Config;
 
 const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
+const diagnostics_request_timeout_ns: i128 = 1500 * std.time.ns_per_ms;
+const tsgo_command = [_][]const u8{ "tsgo", "--lsp", "-stdio" };
+const npx_tsgo_command = [_][]const u8{ "npx", "tsgo", "--lsp", "-stdio" };
+const tsls_command = [_][]const u8{ "typescript-language-server", "--stdio" };
 
 pub const DiagnosticsSnapshot = struct {
     count: usize,
@@ -39,6 +44,7 @@ pub const Client = struct {
     session_ready: bool,
     initialize_request_id: ?u64,
     diagnostics_request_id: ?u64,
+    diagnostics_request_started_ns: i128,
     change_mode: ChangeMode,
     supports_pull_diagnostics: bool,
     did_save_pulse_interval_ns: i128,
@@ -67,6 +73,7 @@ pub const Client = struct {
             .session_ready = false,
             .initialize_request_id = null,
             .diagnostics_request_id = null,
+            .diagnostics_request_started_ns = 0,
             .change_mode = .full,
             .supports_pull_diagnostics = true,
             .did_save_pulse_interval_ns = 64 * std.time.ns_per_ms,
@@ -104,6 +111,7 @@ pub const Client = struct {
         self.session_ready = false;
         self.initialize_request_id = null;
         self.diagnostics_request_id = null;
+        self.diagnostics_request_started_ns = 0;
         self.change_mode = .full;
         self.supports_pull_diagnostics = true;
         self.next_did_save_pulse_ns = 0;
@@ -117,7 +125,7 @@ pub const Client = struct {
         _ = self.setDiagnostics(0, null, "", &[_]usize{});
     }
 
-    pub fn startForFile(self: *Client, file_path: []const u8) !void {
+    pub fn startForFile(self: *Client, file_path: []const u8, config: *const Config) !void {
         self.stop();
 
         const server = presets.forPath(file_path) orelse return;
@@ -125,10 +133,54 @@ pub const Client = struct {
         const abs_file = try absolutePath(self.allocator, file_path);
         defer self.allocator.free(abs_file);
 
-        const root_path = try findRootDir(self.allocator, abs_file, server.root_markers);
+        const root_markers = if (std.mem.eql(u8, server.name, "typescript") and config.lsp_typescript.root_markers.items.len > 0)
+            config.lsp_typescript.root_markers.items
+        else
+            server.root_markers;
+
+        const root_path = try findRootDir(self.allocator, abs_file, root_markers);
         defer self.allocator.free(root_path);
 
-        const argv = try resolveArgv(self.allocator, root_path, server.command);
+        if (std.mem.eql(u8, server.name, "typescript")) {
+            if (config.lsp_typescript.command) |command| {
+                const custom = try buildCommandView(self.allocator, command, config.lsp_typescript.args.items);
+                defer self.allocator.free(custom);
+                if (try self.tryStartServer(server.name, file_path, abs_file, root_path, custom)) return;
+                return error.LspServerUnavailable;
+            }
+
+            switch (config.lsp_typescript.mode) {
+                .tsgo => {
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsgo_command)) return;
+                    if (try self.tryStartTsgoViaNode(server.name, file_path, abs_file, root_path)) return;
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &npx_tsgo_command)) return;
+                },
+                .tsls => {
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsls_command)) return;
+                },
+                .auto => {
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsgo_command)) return;
+                    if (try self.tryStartTsgoViaNode(server.name, file_path, abs_file, root_path)) return;
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &npx_tsgo_command)) return;
+                    if (try self.tryStartServer(server.name, file_path, abs_file, root_path, &tsls_command)) return;
+                },
+            }
+            return error.LspServerUnavailable;
+        }
+
+        if (try self.tryStartServer(server.name, file_path, abs_file, root_path, server.command)) return;
+        return error.LspServerUnavailable;
+    }
+
+    fn tryStartServer(
+        self: *Client,
+        server_name: []const u8,
+        file_path: []const u8,
+        abs_file: []const u8,
+        root_path: []const u8,
+        command: []const []const u8,
+    ) !bool {
+        const argv = try resolveArgv(self.allocator, root_path, command);
         defer freeArgv(self.allocator, argv);
 
         var child = std.process.Child.init(argv, self.allocator);
@@ -136,7 +188,7 @@ pub const Client = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
 
-        try child.spawn();
+        child.spawn() catch return false;
 
         self.child = child;
         self.enabled = true;
@@ -144,12 +196,11 @@ pub const Client = struct {
         self.change_mode = .full;
         self.supports_pull_diagnostics = true;
         self.next_did_save_pulse_ns = 0;
-        self.server_name = server.name;
+        self.server_name = server_name;
         self.version = 1;
 
         if (self.document_uri) |uri| self.allocator.free(uri);
         if (self.root_uri) |uri| self.allocator.free(uri);
-
         self.document_uri = try toFileUri(self.allocator, abs_file);
         self.root_uri = try toFileUri(self.allocator, root_path);
 
@@ -157,10 +208,39 @@ pub const Client = struct {
         if (self.pending_open_text) |pending| self.allocator.free(pending);
         self.pending_open_text = text;
 
-        try self.sendInitialize();
+        self.sendInitialize() catch {
+            self.stop();
+            return false;
+        };
+
+        return true;
+    }
+
+    fn tryStartTsgoViaNode(
+        self: *Client,
+        server_name: []const u8,
+        file_path: []const u8,
+        abs_file: []const u8,
+        root_path: []const u8,
+    ) !bool {
+        const tsgo_script = try std.fs.path.join(self.allocator, &.{
+            root_path,
+            "node_modules",
+            "@typescript",
+            "native-preview",
+            "bin",
+            "tsgo.js",
+        });
+        defer self.allocator.free(tsgo_script);
+
+        if (std.fs.cwd().access(tsgo_script, .{})) |_| {} else |_| return false;
+
+        const cmd = [_][]const u8{ "node", tsgo_script, "--lsp", "-stdio" };
+        return try self.tryStartServer(server_name, file_path, abs_file, root_path, &cmd);
     }
 
     pub fn poll(self: *Client) !bool {
+        self.maybeExpireDiagnosticRequest();
         if (!self.enabled) return false;
         const child = self.child orelse return false;
         const stdout = child.stdout orelse return false;
@@ -446,6 +526,10 @@ pub const Client = struct {
             return true;
         }
 
+        if (self.handleGenericResponse(parsed.value.object)) {
+            return false;
+        }
+
         const method_value = parsed.value.object.get("method") orelse return false;
         if (method_value != .string) return false;
 
@@ -467,9 +551,7 @@ pub const Client = struct {
 
     fn handleServerRequest(self: *Client, object: std.json.ObjectMap, method: []const u8) !bool {
         const id_value = object.get("id") orelse return false;
-        if (id_value != .integer) return false;
-        if (id_value.integer < 0) return false;
-        const id: u64 = @intCast(id_value.integer);
+        const id = parseJsonRpcId(id_value) orelse return false;
 
         if (std.mem.eql(u8, method, "workspace/configuration")) {
             const count = workspaceConfigurationItemCount(object);
@@ -536,6 +618,7 @@ pub const Client = struct {
         };
 
         self.diagnostics_request_id = try self.sendRequest("textDocument/diagnostic", params);
+        self.diagnostics_request_started_ns = std.time.nanoTimestamp();
     }
 
     fn handleDiagnosticResponse(self: *Client, object: std.json.ObjectMap) !bool {
@@ -546,8 +629,7 @@ pub const Client = struct {
         const response_id: u64 = @intCast(id_value.integer);
         if (response_id != request_id) return false;
 
-        self.diagnostics_request_id = null;
-        if (self.pending_requests > 0) self.pending_requests -= 1;
+        self.clearPendingDiagnosticRequest();
 
         if (object.get("error")) |error_value| {
             if (error_value != .null) {
@@ -576,6 +658,49 @@ pub const Client = struct {
         }
     }
 
+    fn handleGenericResponse(self: *Client, object: std.json.ObjectMap) bool {
+        const id_value = object.get("id") orelse return false;
+        if (id_value != .integer or id_value.integer < 0) return false;
+        const response_id: u64 = @intCast(id_value.integer);
+
+        const has_result = object.get("result") != null;
+        const has_error = object.get("error") != null;
+        if (!has_result and !has_error) return false;
+
+        if (self.diagnostics_request_id) |request_id| {
+            if (request_id == response_id) {
+                if (has_error) {
+                    if (object.get("error")) |error_value| {
+                        if (error_value != .null) {
+                            self.supports_pull_diagnostics = false;
+                        }
+                    }
+                }
+                self.clearPendingDiagnosticRequest();
+                return true;
+            }
+        }
+
+        if (self.pending_requests > 0) self.pending_requests -= 1;
+        return true;
+    }
+
+    fn clearPendingDiagnosticRequest(self: *Client) void {
+        self.diagnostics_request_id = null;
+        self.diagnostics_request_started_ns = 0;
+        if (self.pending_requests > 0) self.pending_requests -= 1;
+    }
+
+    fn maybeExpireDiagnosticRequest(self: *Client) void {
+        if (self.diagnostics_request_id == null) return;
+        if (self.diagnostics_request_started_ns == 0) return;
+        const now = std.time.nanoTimestamp();
+        if (now - self.diagnostics_request_started_ns < diagnostics_request_timeout_ns) return;
+
+        self.supports_pull_diagnostics = false;
+        self.clearPendingDiagnosticRequest();
+    }
+
     fn setDiagnosticsFromItems(self: *Client, items: []const std.json.Value) bool {
         const summary = diagnosticsSummary(items);
         var lines = std.array_list.Managed(usize).init(self.allocator);
@@ -599,28 +724,33 @@ pub const Client = struct {
         try self.sendNotification("textDocument/didSave", params);
     }
 
-    fn sendResponseNull(self: *Client, id: u64) !void {
-        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .jsonrpc = "2.0",
-            .id = id,
-            .result = @as(?u8, null),
-        }, .{});
-        defer self.allocator.free(payload);
-        try self.sendPayload(payload);
-    }
-
-    fn sendResponseEmptyArray(self: *Client, id: u64) !void {
+    fn sendResponseNull(self: *Client, id: JsonRpcId) !void {
         var payload = std.array_list.Managed(u8).init(self.allocator);
         defer payload.deinit();
-        try payload.writer().print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{id});
+
+        try payload.appendSlice("{\"jsonrpc\":\"2.0\",\"id\":");
+        try self.appendJsonRpcId(&payload, id);
+        try payload.appendSlice(",\"result\":null}");
         try self.sendPayload(payload.items);
     }
 
-    fn sendResponseNullArray(self: *Client, id: u64, count: usize) !void {
+    fn sendResponseEmptyArray(self: *Client, id: JsonRpcId) !void {
         var payload = std.array_list.Managed(u8).init(self.allocator);
         defer payload.deinit();
 
-        try payload.writer().print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[", .{id});
+        try payload.appendSlice("{\"jsonrpc\":\"2.0\",\"id\":");
+        try self.appendJsonRpcId(&payload, id);
+        try payload.appendSlice(",\"result\":[]}");
+        try self.sendPayload(payload.items);
+    }
+
+    fn sendResponseNullArray(self: *Client, id: JsonRpcId, count: usize) !void {
+        var payload = std.array_list.Managed(u8).init(self.allocator);
+        defer payload.deinit();
+
+        try payload.appendSlice("{\"jsonrpc\":\"2.0\",\"id\":");
+        try self.appendJsonRpcId(&payload, id);
+        try payload.appendSlice(",\"result\":[");
         var i: usize = 0;
         while (i < count) : (i += 1) {
             if (i > 0) try payload.append(',');
@@ -628,6 +758,17 @@ pub const Client = struct {
         }
         try payload.appendSlice("]}");
         try self.sendPayload(payload.items);
+    }
+
+    fn appendJsonRpcId(self: *Client, payload: *std.array_list.Managed(u8), id: JsonRpcId) !void {
+        switch (id) {
+            .integer => |raw| try payload.writer().print("{d}", .{raw}),
+            .string => |raw| {
+                const encoded = try std.json.Stringify.valueAlloc(self.allocator, raw, .{});
+                defer self.allocator.free(encoded);
+                try payload.appendSlice(encoded);
+            },
+        }
     }
 
     fn setDiagnostics(self: *Client, count: usize, first_line: ?usize, first_message_input: []const u8, lines: []const usize) bool {
@@ -680,6 +821,11 @@ pub const Client = struct {
 const DiagnosticsSummary = struct {
     first_line: ?usize,
     first_message: []const u8,
+};
+
+const JsonRpcId = union(enum) {
+    integer: u64,
+    string: []const u8,
 };
 
 fn parseChangeModeFromInitializeResponse(object: std.json.ObjectMap) ChangeMode {
@@ -800,6 +946,17 @@ fn workspaceConfigurationItemCount(object: std.json.ObjectMap) usize {
     return items_value.array.items.len;
 }
 
+fn parseJsonRpcId(value: std.json.Value) ?JsonRpcId {
+    return switch (value) {
+        .integer => |raw| blk: {
+            if (raw < 0) break :blk null;
+            break :blk JsonRpcId{ .integer = @intCast(raw) };
+        },
+        .string => |raw| JsonRpcId{ .string = raw },
+        else => null,
+    };
+}
+
 test "parseContentLength handles CRLF and LF headers" {
     try std.testing.expectEqual(@as(?usize, 42), parseContentLength("Content-Length: 42\r\nContent-Type: x\r\n"));
     try std.testing.expectEqual(@as(?usize, 7), parseContentLength("content-length: 7\n"));
@@ -903,6 +1060,23 @@ test "extractQuotedSymbol parses lint variable name" {
     try std.testing.expectEqualStrings("", extractQuotedSymbol("no quoted symbol"));
 }
 
+test "pending diagnostics request expires and clears" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    client.supports_pull_diagnostics = true;
+    client.pending_requests = 1;
+    client.diagnostics_request_id = 42;
+    client.diagnostics_request_started_ns = std.time.nanoTimestamp() - diagnostics_request_timeout_ns - 1;
+
+    client.maybeExpireDiagnosticRequest();
+
+    try std.testing.expect(client.diagnostics_request_id == null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_requests);
+    try std.testing.expect(!client.supports_pull_diagnostics);
+}
+
 fn resolveArgv(allocator: std.mem.Allocator, root_path: []const u8, command: []const []const u8) ![]const []const u8 {
     var argv = try allocator.alloc([]const u8, command.len);
 
@@ -913,6 +1087,22 @@ fn resolveArgv(allocator: std.mem.Allocator, root_path: []const u8, command: []c
     }
 
     return argv;
+}
+
+fn buildCommandView(
+    allocator: std.mem.Allocator,
+    command: []const u8,
+    args: []const []const u8,
+) ![]const []const u8 {
+    var out = try allocator.alloc([]const u8, args.len + 1);
+    out[0] = command;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        out[i + 1] = args[i];
+    }
+
+    return out;
 }
 
 fn freeArgv(allocator: std.mem.Allocator, argv: []const []const u8) void {
