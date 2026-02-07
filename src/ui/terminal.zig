@@ -5,6 +5,7 @@ pub const KeyEvent = union(enum) {
     char: u8,
     text: []const u8,
     ctrl: u8,
+    ctrl_shift: u8,
     enter,
     tab,
     escape,
@@ -168,6 +169,19 @@ fn mapKey(key: vaxis.Key) ?KeyEvent {
     if (key.matches(vaxis.Key.page_down, .{ .shift = true })) return .shift_page_down;
     if (key.matches(vaxis.Key.left, .{ .ctrl = true })) return .word_left;
     if (key.matches(vaxis.Key.right, .{ .ctrl = true })) return .word_right;
+
+    if (key.mods.ctrl and key.mods.shift and !key.mods.alt and !key.mods.super and !key.mods.meta) {
+        if (key.codepoint < 128) {
+            const raw: u8 = @intCast(key.codepoint);
+            const normalized = if (raw >= 1 and raw <= 26)
+                @as(u8, raw + 'a' - 1)
+            else if (std.ascii.isAlphabetic(raw))
+                std.ascii.toLower(raw)
+            else
+                raw;
+            return KeyEvent{ .ctrl_shift = normalized };
+        }
+    }
 
     if (key.mods.ctrl and !key.mods.alt and !key.mods.super and !key.mods.meta) {
         if (key.codepoint < 128) {

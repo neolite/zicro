@@ -17,6 +17,7 @@ const zig_roots = [_][]const u8{ "build.zig", "build.zig.zon", ".git" };
 const tsgo_args = [_][]const u8{ "--lsp", "-stdio" };
 const npx_tsgo_args = [_][]const u8{ "tsgo", "--lsp", "-stdio" };
 const tsls_args = [_][]const u8{"--stdio"};
+const npx_tsls_args = [_][]const u8{ "typescript-language-server", "--stdio" };
 const ts_ext = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts" };
 const ts_roots = [_][]const u8{ "package.json", "tsconfig.json", "jsconfig.json", ".git" };
 
@@ -58,6 +59,15 @@ const adapters = [_]AdapterPreset{
         .command = "typescript-language-server",
         .args = &tsls_args,
         .priority = 100,
+        .file_extensions = &ts_ext,
+        .root_markers = &ts_roots,
+    },
+    .{
+        .name = "typescript-npx-tsls",
+        .language_id = "typescript",
+        .command = "npx",
+        .args = &npx_tsls_args,
+        .priority = 95,
         .file_extensions = &ts_ext,
         .root_markers = &ts_roots,
     },

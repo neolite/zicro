@@ -42,6 +42,13 @@ const line_gutter_cols: usize = 5;
 const max_events_per_tick: usize = 128;
 const top_bar_rows: usize = 1;
 const footer_rows: usize = 2;
+const max_project_files: usize = 120_000;
+const max_file_index_bytes: usize = 32 * 1024 * 1024;
+
+const FileFrecency = struct {
+    visits: u32 = 0,
+    last_tick: u64 = 0,
+};
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -51,6 +58,10 @@ pub const App = struct {
     ui: UiState,
     lsp_state: LspState,
     highlight_state_cache: std.array_list.Managed(highlighter.LineState),
+    project_root: ?[]u8,
+    file_index: std.array_list.Managed([]u8),
+    file_access_tick: u64,
+    file_frecency: std.StringHashMap(FileFrecency),
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, file_path_opt: ?[]const u8) !App {
         const file_bytes = if (file_path_opt) |path|
@@ -87,13 +98,17 @@ pub const App = struct {
                 @as(i128, @intCast(config.lsp_change_debounce_ms)) * std.time.ns_per_ms,
             ),
             .highlight_state_cache = std.array_list.Managed(highlighter.LineState).init(allocator),
+            .project_root = null,
+            .file_index = std.array_list.Managed([]u8).init(allocator),
+            .file_access_tick = 0,
+            .file_frecency = std.StringHashMap(FileFrecency).init(allocator),
         };
 
         try app.resetHighlightCache();
 
         app.lsp_state.client.setDidSavePulseDebounceMs(config.lsp_did_save_debounce_ms);
 
-        try app.setStatus("Ctrl+S save | Ctrl+Q quit | Ctrl+P palette | Ctrl+N completion | Ctrl+T hover | Ctrl+D definition");
+        try app.setStatus("Ctrl+P files | Ctrl+Shift+P commands | Ctrl+W debug | Ctrl+S save | Ctrl+Q quit");
 
         if (config.enable_lsp and app.editor.file_path != null) {
             app.lsp_state.client.startForFile(app.editor.file_path.?, config) catch |err| switch (err) {
@@ -117,6 +132,14 @@ pub const App = struct {
         self.editor.buffer.deinit();
         if (self.editor.file_path) |path| self.allocator.free(path);
         self.highlight_state_cache.deinit();
+        if (self.project_root) |root| self.allocator.free(root);
+        for (self.file_index.items) |path| self.allocator.free(path);
+        self.file_index.deinit();
+        var frecency_it = self.file_frecency.iterator();
+        while (frecency_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.file_frecency.deinit();
         self.terminal.deinit();
     }
 
@@ -144,11 +167,12 @@ pub const App = struct {
             }
 
             if (self.lsp_state.client.enabled) {
+                const overlay_active = self.ui.palette.active or self.ui.prompt.active;
                 const diagnostics_changed = self.lsp_state.client.poll() catch |err| blk: {
                     try self.handleLspError(err);
                     break :blk true;
                 };
-                if (diagnostics_changed) {
+                if (diagnostics_changed and !overlay_active) {
                     self.ui.needs_render = true;
                 }
                 if (try self.processLspInteractionUpdates()) {
@@ -160,18 +184,18 @@ pub const App = struct {
 
                 const pending_requests = self.lsp_state.client.diagnostics().pending_requests;
                 if (pending_requests != last_pending_requests) {
-                    self.ui.needs_render = true;
+                    if (!overlay_active) self.ui.needs_render = true;
                     last_pending_requests = pending_requests;
                 }
 
                 const spinner_active = !self.lsp_state.client.session_ready or pending_requests > 0;
                 if (spinner_active != last_spinner_active) {
-                    self.ui.needs_render = true;
+                    if (!overlay_active) self.ui.needs_render = true;
                     last_spinner_active = spinner_active;
                     if (!spinner_active) self.ui.lsp_spinner_frame = 0;
                 }
 
-                if (spinner_active) {
+                if (spinner_active and !overlay_active) {
                     const now = std.time.nanoTimestamp();
                     if (next_spinner_frame_ns == 0) {
                         next_spinner_frame_ns = now + 120 * std.time.ns_per_ms;
@@ -392,6 +416,9 @@ pub const App = struct {
 
                 const index = @min(self.ui.lsp_panel_selected, references.items.len - 1);
                 try self.jumpToLocation(references.items[index], true);
+                self.closeLspPanel();
+            },
+            .project_search => {
                 self.closeLspPanel();
             },
         }
@@ -888,6 +915,7 @@ pub const App = struct {
     }
 
     fn openFilePath(self: *App, path: []const u8) !void {
+        const started_ns = std.time.nanoTimestamp();
         const file_bytes = try readFileAllocAnyPath(self.allocator, path, max_open_file_bytes);
         defer self.allocator.free(file_bytes);
 
@@ -920,6 +948,10 @@ pub const App = struct {
         if (self.config.enable_lsp and self.editor.file_path != null) {
             self.lsp_state.client.startForFile(self.editor.file_path.?, self.config) catch {};
         }
+
+        const elapsed = std.time.nanoTimestamp() - started_ns;
+        self.ui.file_open_last_ms = nsToMs(elapsed);
+        try self.noteFileAccess(path);
     }
 
     fn executeCommand(self: *App, command: Command) !void {
@@ -944,14 +976,16 @@ pub const App = struct {
                 self.ui.prompt.open(.regex_search);
                 self.ui.palette.active = false;
             },
-            .toggle_comment => try self.toggleCommentSelection(),
-            .show_palette => {
+            .project_search => {
                 self.closeLspPanel();
-                self.ui.palette.active = true;
-                self.ui.palette.clear();
-                self.ui.prompt.close();
-                self.editor.preferred_visual_col = null;
+                self.ui.prompt.open(.project_search);
+                self.ui.palette.active = false;
             },
+            .toggle_comment => try self.toggleCommentSelection(),
+            .show_file_finder => self.openFileFinder() catch |err| {
+                try self.setStatusFromPrefix("File finder: ", @errorName(err));
+            },
+            .show_command_palette => self.openCommandPalette(),
             .move_left => {
                 self.clearSelection();
                 const next = self.editor.buffer.prevCodepointStart(self.editor.cursor);
@@ -1137,7 +1171,217 @@ pub const App = struct {
             .lsp_definition => try self.requestDefinition(),
             .lsp_references => try self.requestReferences(),
             .lsp_jump_back => try self.jumpBack(),
+            .toggle_debug_panel => {
+                self.ui.debug_panel_enabled = !self.ui.debug_panel_enabled;
+                if (self.ui.debug_panel_enabled) {
+                    try self.setStatus("Debug panel: on");
+                } else {
+                    try self.setStatus("Debug panel: off");
+                }
+            },
         }
+    }
+
+    fn openCommandPalette(self: *App) void {
+        self.closeLspPanel();
+        self.ui.palette.active = true;
+        self.ui.palette.mode = .commands;
+        self.ui.palette.clear();
+        self.ui.prompt.close();
+        self.editor.preferred_visual_col = null;
+    }
+
+    fn openFileFinder(self: *App) !void {
+        self.closeLspPanel();
+        self.ui.prompt.close();
+        self.ui.palette.active = true;
+        self.ui.palette.mode = .files;
+        self.ui.palette.clear();
+        self.editor.preferred_visual_col = null;
+        self.ensureProjectFileIndex() catch |err| {
+            try self.setStatusFromPrefix("File index: ", @errorName(err));
+        };
+    }
+
+    fn ensureProjectFileIndex(self: *App) !void {
+        if (self.project_root != null and self.file_index.items.len > 0) return;
+        const started_ns = std.time.nanoTimestamp();
+
+        if (self.project_root) |root| {
+            self.allocator.free(root);
+            self.project_root = null;
+        }
+        for (self.file_index.items) |path| self.allocator.free(path);
+        self.file_index.clearRetainingCapacity();
+
+        const root = try self.discoverProjectRoot();
+        self.project_root = root;
+        try self.loadProjectFileIndex(root);
+        self.ui.file_index_last_ms = nsToMs(std.time.nanoTimestamp() - started_ns);
+        self.ui.file_index_count = self.file_index.items.len;
+    }
+
+    fn discoverProjectRoot(self: *App) ![]u8 {
+        const start_path = if (self.editor.file_path) |path|
+            try std.fs.realpathAlloc(self.allocator, path)
+        else
+            try std.fs.cwd().realpathAlloc(self.allocator, ".");
+        defer self.allocator.free(start_path);
+
+        const start_dir = std.fs.path.dirname(start_path) orelse start_path;
+        const fallback_dir = try self.allocator.dupe(u8, start_dir);
+        errdefer self.allocator.free(fallback_dir);
+
+        var current = try self.allocator.dupe(u8, start_dir);
+        errdefer self.allocator.free(current);
+
+        while (true) {
+            if (try pathExists(self.allocator, current, ".git")) {
+                self.allocator.free(fallback_dir);
+                return current;
+            }
+            if (try pathExists(self.allocator, current, "package.json")) {
+                self.allocator.free(fallback_dir);
+                return current;
+            }
+            if (try pathExists(self.allocator, current, "tsconfig.json")) {
+                self.allocator.free(fallback_dir);
+                return current;
+            }
+            if (try pathExists(self.allocator, current, "build.zig")) {
+                self.allocator.free(fallback_dir);
+                return current;
+            }
+
+            const parent = std.fs.path.dirname(current) orelse {
+                self.allocator.free(current);
+                return fallback_dir;
+            };
+            if (std.mem.eql(u8, parent, current)) {
+                self.allocator.free(current);
+                return fallback_dir;
+            }
+
+            const next = try self.allocator.dupe(u8, parent);
+            self.allocator.free(current);
+            current = next;
+        }
+    }
+
+    fn loadProjectFileIndex(self: *App, root: []const u8) !void {
+        if (try self.loadProjectFileIndexWithRg(root)) {
+            return;
+        }
+
+        var dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
+        defer dir.close();
+        var walker = try dir.walk(self.allocator);
+        defer walker.deinit();
+
+        while (try walker.next()) |entry| {
+            if (std.mem.indexOf(u8, entry.path, "/.git/") != null or
+                std.mem.startsWith(u8, entry.path, ".git/") or
+                std.mem.indexOf(u8, entry.path, "/node_modules/") != null or
+                std.mem.startsWith(u8, entry.path, "node_modules/") or
+                std.mem.indexOf(u8, entry.path, "/.zig-cache/") != null or
+                std.mem.startsWith(u8, entry.path, ".zig-cache/") or
+                std.mem.indexOf(u8, entry.path, "/zig-out/") != null or
+                std.mem.startsWith(u8, entry.path, "zig-out/") or
+                std.mem.indexOf(u8, entry.path, "/dist/") != null or
+                std.mem.startsWith(u8, entry.path, "dist/") or
+                std.mem.indexOf(u8, entry.path, "/build/") != null or
+                std.mem.startsWith(u8, entry.path, "build/") or
+                std.mem.indexOf(u8, entry.path, "/target/") != null or
+                std.mem.startsWith(u8, entry.path, "target/"))
+            {
+                continue;
+            }
+            if (entry.kind != .file) continue;
+            if (self.file_index.items.len >= max_project_files) break;
+            try self.file_index.append(try self.allocator.dupe(u8, entry.path));
+        }
+    }
+
+    fn loadProjectFileIndexWithRg(self: *App, root: []const u8) !bool {
+        var args = std.array_list.Managed([]const u8).init(self.allocator);
+        defer args.deinit();
+        try args.append("rg");
+        try args.append("--files");
+        try args.append("--hidden");
+        try args.append("-g");
+        try args.append("!.git/");
+        try args.append("-g");
+        try args.append("!node_modules/");
+        try args.append("-g");
+        try args.append("!.zig-cache/");
+        try args.append("-g");
+        try args.append("!zig-out/");
+        try args.append("-g");
+        try args.append("!dist/");
+        try args.append("-g");
+        try args.append("!build/");
+        try args.append("-g");
+        try args.append("!target/");
+        if (try pathExists(self.allocator, root, ".zicroignore")) {
+            try args.append("--ignore-file");
+            try args.append(".zicroignore");
+        }
+
+        var child = std.process.Child.init(args.items, self.allocator);
+        child.cwd = root;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+
+        var out = std.array_list.Managed(u8).init(self.allocator);
+        defer out.deinit();
+
+        child.spawn() catch return false;
+        defer {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+        }
+
+        const stdout = child.stdout orelse return false;
+        const bytes = stdout.readToEndAlloc(self.allocator, max_file_index_bytes) catch return false;
+        defer self.allocator.free(bytes);
+
+        var start: usize = 0;
+        while (start < bytes.len and self.file_index.items.len < max_project_files) {
+            const nl = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
+            const line = bytes[start..nl];
+            if (line.len > 0) {
+                try self.file_index.append(try self.allocator.dupe(u8, line));
+            }
+            start = if (nl < bytes.len) nl + 1 else nl;
+        }
+
+        return self.file_index.items.len > 0;
+    }
+
+    fn noteFileAccess(self: *App, opened_path: []const u8) !void {
+        const root = self.project_root orelse return;
+        const abs_opened = std.fs.realpathAlloc(self.allocator, opened_path) catch return;
+        defer self.allocator.free(abs_opened);
+
+        if (!std.mem.startsWith(u8, abs_opened, root)) return;
+        if (abs_opened.len == root.len) return;
+        if (abs_opened[root.len] != std.fs.path.sep) return;
+
+        const rel = abs_opened[root.len + 1 ..];
+        self.file_access_tick +%= 1;
+
+        if (self.file_frecency.getPtr(rel)) |existing| {
+            existing.visits +%= 1;
+            existing.last_tick = self.file_access_tick;
+            return;
+        }
+
+        const key = try self.allocator.dupe(u8, rel);
+        try self.file_frecency.put(key, .{
+            .visits = 1,
+            .last_tick = self.file_access_tick,
+        });
     }
 
     fn handlePaletteInput(self: *App, event: KeyEvent) !void {
@@ -1168,9 +1412,24 @@ pub const App = struct {
                 }
 
                 const index = @min(self.ui.palette.selected, matches.items.len - 1);
-                const action = palette_entries[matches.items[index]].action;
+                const selected = matches.items[index];
                 self.ui.palette.active = false;
-                try self.executePaletteAction(action);
+
+                switch (self.ui.palette.mode) {
+                    .commands => {
+                        const action = palette_entries[selected].action;
+                        try self.executePaletteAction(action);
+                    },
+                    .files => {
+                        if (selected < self.file_index.items.len) {
+                            const root = self.project_root orelse return;
+                            const full_path = try std.fs.path.join(self.allocator, &.{ root, self.file_index.items[selected] });
+                            defer self.allocator.free(full_path);
+                            try self.openFilePath(full_path);
+                            try self.setStatus("Opened file");
+                        }
+                    },
+                }
             },
             .char => |ch| {
                 if (std.ascii.isPrint(ch) or ch == ' ') {
@@ -1185,6 +1444,9 @@ pub const App = struct {
                 }
             },
             .ctrl => |ch| {
+                if (ch == 'p') self.ui.palette.active = false;
+            },
+            .ctrl_shift => |ch| {
                 if (ch == 'p') self.ui.palette.active = false;
             },
             else => {},
@@ -1232,6 +1494,7 @@ pub const App = struct {
         switch (mode) {
             .goto_line => try self.executeGotoLine(query),
             .regex_search => try self.executeRegexSearch(query),
+            .project_search => try self.executeRegexSearch(query),
         }
     }
 
@@ -2057,6 +2320,23 @@ fn readFileAllocAnyPath(allocator: std.mem.Allocator, path: []const u8, max_byte
     return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
 }
 
+fn pathExists(allocator: std.mem.Allocator, dir_path: []const u8, leaf: []const u8) !bool {
+    const candidate = try std.fs.path.join(allocator, &.{ dir_path, leaf });
+    defer allocator.free(candidate);
+    if (std.fs.path.isAbsolute(candidate)) {
+        if (std.fs.accessAbsolute(candidate, .{})) |_| {
+            return true;
+        } else |_| {
+            return false;
+        }
+    }
+    if (std.fs.cwd().access(candidate, .{})) |_| {
+        return true;
+    } else |_| {
+        return false;
+    }
+}
+
 fn filePathFromUriAlloc(allocator: std.mem.Allocator, uri: []const u8) ![]u8 {
     if (!std.mem.startsWith(u8, uri, "file://")) return error.UnsupportedUri;
 
@@ -2155,6 +2435,12 @@ fn nsToTenthsMs(value_ns: i128) u16 {
     const tenths_u128 = ns_u128 / (std.time.ns_per_ms / 10);
     const capped = if (tenths_u128 > std.math.maxInt(u64)) std.math.maxInt(u64) else @as(u64, @intCast(tenths_u128));
     return clampU16(capped);
+}
+
+fn nsToMs(value_ns: i128) u32 {
+    if (value_ns <= 0) return 0;
+    const ms = @as(u64, @intCast(@divTrunc(value_ns + std.time.ns_per_ms / 2, std.time.ns_per_ms)));
+    return if (ms > std.math.maxInt(u32)) std.math.maxInt(u32) else @as(u32, @intCast(ms));
 }
 
 fn fpsTenthsFromFrameTenths(frame_tenths_ms: u16) u16 {

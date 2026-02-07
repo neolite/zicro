@@ -29,6 +29,8 @@ pub const LineState = struct {
     in_block_comment: bool = false,
     in_template_string: bool = false,
     template_expr_depth: u32 = 0,
+    in_jsx_tag: bool = false,
+    jsx_attr_quote: ?u8 = null,
 };
 
 pub const LineHighlight = struct {
@@ -99,6 +101,25 @@ const ts_js_keywords = std.StaticStringMap(void).initComptime(.{
     .{ "readonly", {} },
     .{ "enum", {} },
     .{ "namespace", {} },
+    .{ "declare", {} },
+    .{ "module", {} },
+    .{ "abstract", {} },
+    .{ "static", {} },
+    .{ "yield", {} },
+    .{ "keyof", {} },
+    .{ "infer", {} },
+    .{ "is", {} },
+    .{ "satisfies", {} },
+    .{ "asserts", {} },
+    .{ "unknown", {} },
+    .{ "never", {} },
+    .{ "any", {} },
+    .{ "void", {} },
+    .{ "typeof", {} },
+    .{ "instanceof", {} },
+    .{ "delete", {} },
+    .{ "in", {} },
+    .{ "of", {} },
 });
 
 const bash_keywords = std.StaticStringMap(void).initComptime(.{
@@ -186,6 +207,12 @@ fn scanLine(
 
     var i: usize = 0;
     while (i < line.len) {
+        if (is_js_ts and state.in_jsx_tag) {
+            i = try scanJsxTag(spans_opt, line, i, &state);
+            if (i >= line.len) return state;
+            continue;
+        }
+
         if (is_js_ts and state.in_block_comment) {
             const start = i;
             if (indexOfBlockCommentEnd(line, i)) |end_index| {
@@ -224,6 +251,21 @@ fn scanLine(
         }
 
         const ch = line[i];
+        if (is_js_ts and isPotentialJsxTagStart(line, i)) {
+            i = try scanJsxTag(spans_opt, line, i, &state);
+            if (i >= line.len) return state;
+            continue;
+        }
+
+        if (is_js_ts and isRegexLiteralStart(line, i)) {
+            const end = scanRegexLiteral(line, i);
+            if (end > i + 1) {
+                try appendSpan(spans_opt, i, end, .string);
+                i = end;
+                continue;
+            }
+        }
+
         if (is_js_ts and ch == '`') {
             state.in_template_string = true;
             state.template_expr_depth = 0;
@@ -256,8 +298,7 @@ fn scanLine(
 
         if (std.ascii.isDigit(ch)) {
             const start = i;
-            i += 1;
-            while (i < line.len and (std.ascii.isDigit(line[i]) or line[i] == '_' or line[i] == '.')) : (i += 1) {}
+            i = scanNumberLiteral(line, i);
             try appendSpan(spans_opt, start, i, .number);
             continue;
         }
@@ -292,6 +333,84 @@ fn scanLine(
     }
 
     return state;
+}
+
+fn scanJsxTag(
+    spans_opt: ?*std.array_list.Managed(Span),
+    line: []const u8,
+    start_index: usize,
+    state: *LineState,
+) !usize {
+    var i = start_index;
+    if (!state.in_jsx_tag) {
+        state.in_jsx_tag = true;
+        try appendSpan(spans_opt, i, i + 1, .operator); // <
+        i += 1;
+        if (i < line.len and line[i] == '/') {
+            try appendSpan(spans_opt, i, i + 1, .operator); // </
+            i += 1;
+        }
+    }
+
+    while (i < line.len) {
+        if (state.jsx_attr_quote) |quote| {
+            const end = scanQuotedString(line, i, quote);
+            try appendSpan(spans_opt, i, end, .string);
+            if (end <= line.len and end > i and line[end - 1] == quote) {
+                state.jsx_attr_quote = null;
+            }
+            i = end;
+            continue;
+        }
+
+        const ch = line[i];
+        if (std.ascii.isWhitespace(ch)) {
+            i += 1;
+            continue;
+        }
+
+        if (ch == '"' or ch == '\'') {
+            state.jsx_attr_quote = ch;
+            continue;
+        }
+
+        if (ch == '{' or ch == '}' or ch == '=' or ch == ':') {
+            try appendSpan(spans_opt, i, i + 1, .operator);
+            i += 1;
+            continue;
+        }
+
+        if (ch == '/' and i + 1 < line.len and line[i + 1] == '>') {
+            try appendSpan(spans_opt, i, i + 2, .operator); // />
+            i += 2;
+            state.in_jsx_tag = false;
+            return i;
+        }
+
+        if (ch == '>') {
+            try appendSpan(spans_opt, i, i + 1, .operator); // >
+            i += 1;
+            state.in_jsx_tag = false;
+            return i;
+        }
+
+        if (isIdentStart(ch)) {
+            const ident_start = i;
+            i += 1;
+            while (i < line.len and isJsxIdent(line[i])) : (i += 1) {}
+
+            var probe = i;
+            while (probe < line.len and std.ascii.isWhitespace(line[probe])) : (probe += 1) {}
+            const token: TokenType = if (probe < line.len and line[probe] == '=') .keyword else .macro;
+            try appendSpan(spans_opt, ident_start, i, token);
+            continue;
+        }
+
+        try appendSpan(spans_opt, i, i + 1, .operator);
+        i += 1;
+    }
+
+    return i;
 }
 
 fn scanTemplateText(
@@ -347,6 +466,105 @@ fn scanQuotedString(line: []const u8, start: usize, quote: u8) usize {
         }
     }
     return line.len;
+}
+
+fn scanNumberLiteral(line: []const u8, start: usize) usize {
+    var i = start;
+    if (line[start] == '0' and start + 1 < line.len) {
+        const prefix = std.ascii.toLower(line[start + 1]);
+        if (prefix == 'x' or prefix == 'b' or prefix == 'o') {
+            i = start + 2;
+            while (i < line.len and isNumOrSep(line[i])) : (i += 1) {}
+            if (i < line.len and line[i] == 'n') i += 1;
+            return i;
+        }
+    }
+
+    i += 1;
+    while (i < line.len and (std.ascii.isDigit(line[i]) or line[i] == '_')) : (i += 1) {}
+    if (i < line.len and line[i] == '.') {
+        i += 1;
+        while (i < line.len and (std.ascii.isDigit(line[i]) or line[i] == '_')) : (i += 1) {}
+    }
+    if (i < line.len and (line[i] == 'e' or line[i] == 'E')) {
+        i += 1;
+        if (i < line.len and (line[i] == '+' or line[i] == '-')) i += 1;
+        while (i < line.len and (std.ascii.isDigit(line[i]) or line[i] == '_')) : (i += 1) {}
+    }
+    if (i < line.len and line[i] == 'n') i += 1;
+    return i;
+}
+
+fn isRegexLiteralStart(line: []const u8, index: usize) bool {
+    if (index >= line.len or line[index] != '/') return false;
+    if (index + 1 >= line.len) return false;
+    const next = line[index + 1];
+    if (next == '/' or next == '*' or next == '=') return false;
+
+    const prev = prevSignificantChar(line, index);
+    if (prev == null) return true;
+    return switch (prev.?) {
+        '(', '[', '{', ',', ';', ':', '=', '!', '?', '&', '|', '^', '~', '+', '-', '*', '%', '<', '>' => true,
+        else => false,
+    };
+}
+
+fn isPotentialJsxTagStart(line: []const u8, index: usize) bool {
+    if (index >= line.len or line[index] != '<') return false;
+    if (index + 1 >= line.len) return false;
+
+    const next = line[index + 1];
+    const next_ok = next == '/' or next == '>' or std.ascii.isAlphabetic(next);
+    if (!next_ok) return false;
+
+    const prev = prevSignificantChar(line, index);
+    if (prev == null) return true;
+    return switch (prev.?) {
+        '(', '[', '{', ',', ';', ':', '=', '!', '?', '&', '|', '^', '~', '+', '-', '*', '%', '<', '>' => true,
+        else => false,
+    };
+}
+
+fn scanRegexLiteral(line: []const u8, start: usize) usize {
+    var i = start + 1;
+    var escaped = false;
+    var in_class = false;
+    while (i < line.len) : (i += 1) {
+        const ch = line[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch == '[') {
+            in_class = true;
+            continue;
+        }
+        if (ch == ']') {
+            in_class = false;
+            continue;
+        }
+        if (ch == '/' and !in_class) {
+            i += 1;
+            while (i < line.len and std.ascii.isAlphabetic(line[i])) : (i += 1) {}
+            return i;
+        }
+    }
+    return start + 1;
+}
+
+fn prevSignificantChar(line: []const u8, index: usize) ?u8 {
+    if (index == 0) return null;
+    var i = index;
+    while (i > 0) {
+        i -= 1;
+        const ch = line[i];
+        if (!std.ascii.isWhitespace(ch)) return ch;
+    }
+    return null;
 }
 
 fn appendSpan(
@@ -406,6 +624,14 @@ fn isIdent(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
 
+fn isJsxIdent(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch == '.';
+}
+
+fn isNumOrSep(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
 fn isOperator(ch: u8) bool {
     return switch (ch) {
         '+', '-', '*', '/', '%', '=', '<', '>', '!', '&', '|', '^', '~', '?', ':', '.', ',', ';', '(', ')', '[', ']', '{', '}' => true,
@@ -445,4 +671,40 @@ test "template literals carry expression state across lines" {
     defer allocator.free(second.spans);
     try std.testing.expect(!second.next_state.in_template_string);
     try std.testing.expectEqual(@as(u32, 0), second.next_state.template_expr_depth);
+}
+
+test "typescript regex literal highlighting" {
+    const allocator = std.testing.allocator;
+    const spans = try highlightLine(allocator, .typescript, "const r = /ab+c\\/d/i; value / 2;");
+    defer allocator.free(spans);
+
+    var has_regex = false;
+    for (spans) |span| {
+        if (span.token == .string and span.start <= 10 and span.end >= 20) {
+            has_regex = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_regex);
+}
+
+test "tsx jsx tag highlighting keeps state across lines" {
+    const allocator = std.testing.allocator;
+
+    const first = try highlightLineWithState(allocator, .typescript, "<Button", emptyState());
+    defer allocator.free(first.spans);
+    try std.testing.expect(first.next_state.in_jsx_tag);
+
+    const second = try highlightLineWithState(allocator, .typescript, "  title=\"hi\">", first.next_state);
+    defer allocator.free(second.spans);
+    try std.testing.expect(!second.next_state.in_jsx_tag);
+
+    var has_attr = false;
+    var has_string = false;
+    for (second.spans) |span| {
+        if (span.token == .keyword) has_attr = true;
+        if (span.token == .string) has_string = true;
+    }
+    try std.testing.expect(has_attr);
+    try std.testing.expect(has_string);
 }

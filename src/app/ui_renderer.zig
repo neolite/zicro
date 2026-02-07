@@ -55,11 +55,18 @@ pub fn render(
         try renderHoverTooltip(self, &out, frame_allocator, top_bar_rows, line_gutter_cols, terminal_tab_width);
     }
 
+    if (self.ui.debug_panel_enabled and !self.ui.palette.active and !self.ui.prompt.active) {
+        try renderDebugPanel(self, &out, top_bar_rows, terminal_tab_width);
+    }
+
     if (self.ui.palette.active) {
         try renderPalette(self, &out, frame_allocator);
+        const palette_layout = computePaletteLayout(self);
+        const label = paletteLabel(self);
         const query_col = displayWidth(self.ui.palette.query.items, terminal_tab_width);
-        const cursor_col = @min(query_col + 12, self.terminal.width);
-        try out.writer().print("\x1b[{d};{d}H", .{ 2, cursor_col });
+        const label_width = displayWidth(label, terminal_tab_width);
+        const cursor_col = @min(palette_layout.col + 1 + label_width + query_col, self.terminal.width);
+        try out.writer().print("\x1b[{d};{d}H", .{ palette_layout.row + 1, cursor_col });
     } else if (self.ui.prompt.active) {
         const label = promptLabel(self.ui.prompt.mode);
         const cursor_col = @min(displayWidth(label, terminal_tab_width) + displayWidth(self.ui.prompt.query.items, terminal_tab_width) + 2, self.terminal.width);
@@ -218,6 +225,12 @@ pub fn renderStatusBar(
         diagnostics.last_latency_ms,
         diagnostics.count,
     });
+    if (self.ui.file_open_last_ms > 0) {
+        try right.writer().print(" | Open:{d}ms", .{self.ui.file_open_last_ms});
+    }
+    if (self.ui.file_index_last_ms > 0 and self.ui.file_index_count > 0) {
+        try right.writer().print(" | Index:{d}ms/{d}", .{ self.ui.file_index_last_ms, self.ui.file_index_count });
+    }
     if (self.config.ui_perf_overlay) {
         const ema_whole = self.ui.perf_fps_ema_tenths / 10;
         const ema_frac = self.ui.perf_fps_ema_tenths % 10;
@@ -323,21 +336,130 @@ pub fn diagnosticSymbolRangeOnLine(self: anytype, line_index: usize, line: []con
 
 pub fn renderPalette(self: anytype, out: *std.array_list.Managed(u8), frame_allocator: std.mem.Allocator) !void {
     const matches = try paletteMatches(self, frame_allocator);
+    const label = paletteLabel(self);
+    const palette_layout = computePaletteLayout(self);
+    const row_top = palette_layout.row;
+    const col = palette_layout.col;
+    const width = palette_layout.width;
+    const content_width = width -| 2;
 
-    try out.writer().print("\x1b[2;2H\x1b[48;5;238m\x1b[97m Command: {s}\x1b[0m", .{self.ui.palette.query.items});
-
-    const max_rows = @min(@as(usize, 6), matches.items.len);
-    var row: usize = 0;
-    while (row < max_rows) : (row += 1) {
-        const entry = palette_entries[matches.items[row]];
-        const selected = row == @min(self.ui.palette.selected, matches.items.len - 1);
-        const prefix = if (selected) "> " else "  ";
-        try out.writer().print("\x1b[{d};2H\x1b[K", .{3 + row});
-        if (selected) {
-            try out.appendSlice("\x1b[48;5;240m\x1b[97m");
-        }
-        try out.writer().print("{s}{s}\x1b[0m", .{ prefix, entry.label });
+    // Border top
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m+", .{ row_top, col });
+    var x: usize = 0;
+    while (x < content_width) : (x += 1) {
+        try out.append('-');
     }
+    try out.appendSlice("+\x1b[0m");
+
+    // Header
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m|\x1b[48;5;236m\x1b[97m", .{ row_top + 1, col });
+    try out.appendSlice(label);
+    const label_width = displayWidth(label, 8);
+    const suffix = if (self.ui.palette.mode == .files and self.ui.file_open_last_ms > 0)
+        try std.fmt.allocPrint(frame_allocator, " | Open:{d}ms", .{self.ui.file_open_last_ms})
+    else
+        "";
+    const suffix_width = displayWidth(suffix, 8);
+    const query_width_cap = (content_width -| label_width) -| suffix_width;
+    const query_clipped = self.ui.palette.query.items[0..byteLimitForDisplayWidth(self.ui.palette.query.items, query_width_cap, 8)];
+    try out.appendSlice(query_clipped);
+    try out.appendSlice(suffix);
+    var header_pad = label_width + displayWidth(query_clipped, 8) + suffix_width;
+    while (header_pad < content_width) : (header_pad += 1) try out.append(' ');
+    try out.appendSlice("\x1b[0m\x1b[38;5;240m|\x1b[0m");
+
+    const visible_rows = palette_layout.rows;
+    var row: usize = 0;
+    while (row < visible_rows) : (row += 1) {
+        const has_item = row < matches.items.len;
+        const text = if (has_item)
+            switch (self.ui.palette.mode) {
+                .commands => palette_entries[matches.items[row]].label,
+                .files => self.file_index.items[matches.items[row]],
+            }
+        else
+            "";
+        const selected = has_item and row == @min(self.ui.palette.selected, matches.items.len - 1);
+        const prefix = if (selected) "> " else "  ";
+        try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m|\x1b[0m", .{ row_top + 2 + row, col });
+        if (selected) {
+            try out.appendSlice("\x1b[48;5;24m\x1b[97m");
+        } else {
+            try out.appendSlice("\x1b[48;5;235m\x1b[37m");
+        }
+        try out.appendSlice(prefix);
+        const prefix_w = displayWidth(prefix, 8);
+        const line_width_cap = content_width -| prefix_w;
+        const clipped = text[0..byteLimitForDisplayWidth(text, line_width_cap, 8)];
+        try out.appendSlice(clipped);
+        var pad = prefix_w + displayWidth(clipped, 8);
+        while (pad < content_width) : (pad += 1) try out.append(' ');
+        try out.appendSlice("\x1b[0m\x1b[38;5;240m|\x1b[0m");
+    }
+
+    const metrics_row = row_top + 2 + visible_rows;
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m|\x1b[48;5;236m\x1b[97m", .{ metrics_row, col });
+    if (self.ui.palette.mode == .files) {
+        var metrics = std.array_list.Managed(u8).init(frame_allocator);
+        try metrics.writer().print(" Open:{d}ms", .{self.ui.file_open_last_ms});
+        if (self.ui.file_index_last_ms > 0 and self.ui.file_index_count > 0) {
+            try metrics.writer().print(" | Index:{d}ms/{d}", .{ self.ui.file_index_last_ms, self.ui.file_index_count });
+        }
+        const metric_clipped = metrics.items[0..byteLimitForDisplayWidth(metrics.items, content_width, 8)];
+        try out.appendSlice(metric_clipped);
+        var metric_pad = displayWidth(metric_clipped, 8);
+        while (metric_pad < content_width) : (metric_pad += 1) try out.append(' ');
+    } else {
+        var metric_pad: usize = 0;
+        while (metric_pad < content_width) : (metric_pad += 1) try out.append(' ');
+    }
+    try out.appendSlice("\x1b[0m\x1b[38;5;240m|\x1b[0m");
+
+    // Border bottom
+    const row_bottom = metrics_row + 1;
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m+", .{ row_bottom, col });
+    x = 0;
+    while (x < content_width) : (x += 1) {
+        try out.append('-');
+    }
+    try out.appendSlice("+\x1b[0m");
+}
+
+const PaletteLayout = struct {
+    row: usize,
+    col: usize,
+    width: usize,
+    rows: usize,
+};
+
+fn computePaletteLayout(self: anytype) PaletteLayout {
+    const max_list_rows: usize = 8;
+    const rows_total = max_list_rows + 4;
+    const width_target = @min(@max(self.terminal.width * 70 / 100, @as(usize, 48)), self.terminal.width -| 2);
+    const width = @max(width_target, @as(usize, 20));
+
+    const row = if (self.terminal.height > rows_total)
+        @max((self.terminal.height - rows_total) / 2, @as(usize, 2))
+    else
+        2;
+    const col = if (self.terminal.width > width)
+        @max((self.terminal.width - width) / 2, @as(usize, 2))
+    else
+        1;
+
+    return .{
+        .row = row,
+        .col = col,
+        .width = width,
+        .rows = max_list_rows,
+    };
+}
+
+fn paletteLabel(self: anytype) []const u8 {
+    return switch (self.ui.palette.mode) {
+        .commands => "Command: ",
+        .files => "File: ",
+    };
 }
 
 fn renderLspPanel(
@@ -397,6 +519,20 @@ fn renderLspPanel(
                 } else {
                     try out.writer().print("external L{d}:{d}", .{ item.line + 1, item.character + 1 });
                 }
+                try out.appendSlice("\x1b[0m");
+            }
+        },
+        .project_search => {
+            const results = self.ui.project_search_results.items;
+            try out.writer().print("\x1b[{d};{d}H\x1b[48;5;238m\x1b[97m Search \x1b[0m", .{ start_row - 1, start_col });
+            const rows = @min(max_rows, results.len);
+            var row: usize = 0;
+            while (row < rows) : (row += 1) {
+                const selected = row == @min(self.ui.lsp_panel_selected, results.len - 1);
+                try out.writer().print("\x1b[{d};{d}H\x1b[K", .{ start_row + row, start_col });
+                if (selected) try out.appendSlice("\x1b[48;5;240m\x1b[97m");
+                const item = results[row];
+                try out.writer().print("{s}:{d}:{d} {s}", .{ item.path, item.line, item.column, item.text });
                 try out.appendSlice("\x1b[0m");
             }
         },
@@ -466,6 +602,69 @@ fn renderHoverTooltip(
     }
 }
 
+fn renderDebugPanel(
+    self: anytype,
+    out: *std.array_list.Managed(u8),
+    top_bar_rows: usize,
+    terminal_tab_width: usize,
+) !void {
+    const panel_width: usize = @min(@as(usize, 56), self.terminal.width -| 2);
+    const panel_height: usize = 8;
+    const row: usize = top_bar_rows + 2;
+    const col: usize = if (self.terminal.width > panel_width + 1) self.terminal.width - panel_width else 1;
+
+    const diagnostics = self.lsp_state.client.diagnostics();
+    const lsp_state = if (!self.lsp_state.client.enabled)
+        "off"
+    else if (!self.lsp_state.client.session_ready)
+        "starting"
+    else if (diagnostics.pending_requests > 0)
+        "waiting"
+    else
+        "ready";
+    const file_name = self.editor.file_path orelse "[No Name]";
+    const pos = self.editor.buffer.lineColFromOffset(self.editor.cursor);
+    const visual_col = self.editor.buffer.visualColumnFromOffset(self.editor.cursor, terminal_tab_width);
+
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m+\x1b[0m", .{ row, col });
+    var x: usize = 0;
+    while (x < panel_width - 2) : (x += 1) try out.append('-');
+    try out.appendSlice("+\x1b[0m");
+
+    const rows = [_][]const u8{
+        " Debug",
+    };
+    _ = rows;
+
+    var line_index: usize = 0;
+    while (line_index < panel_height - 2) : (line_index += 1) {
+        try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m|\x1b[48;5;235m\x1b[37m", .{ row + 1 + line_index, col });
+        var line = std.array_list.Managed(u8).init(self.ui.render_arena.allocator());
+        switch (line_index) {
+            0 => try line.writer().print(" LSP:{s} pending:{d} rtt:{d}ms", .{ lsp_state, diagnostics.pending_requests, diagnostics.last_latency_ms }),
+            1 => try line.writer().print(" Diag:{d} Open:{d}ms Index:{d}ms/{d}", .{ diagnostics.count, self.ui.file_open_last_ms, self.ui.file_index_last_ms, self.ui.file_index_count }),
+            2 => try line.writer().print(" FPS avg:{d} ema:{d}.{d}", .{ self.ui.perf_fps_avg, self.ui.perf_fps_ema_tenths / 10, self.ui.perf_fps_ema_tenths % 10 }),
+            3 => try line.writer().print(" FT avg:{d}.{d} p95:{d}.{d}ms", .{ self.ui.perf_ft_avg_tenths_ms / 10, self.ui.perf_ft_avg_tenths_ms % 10, self.ui.perf_ft_p95_tenths_ms / 10, self.ui.perf_ft_p95_tenths_ms % 10 }),
+            4 => {
+                try line.appendSlice(" File: ");
+                try appendSanitizedSingleLine(&line, file_name);
+            },
+            5 => try line.writer().print(" Cursor: Ln {d}, Col {d}", .{ pos.line + 1, visual_col + 1 }),
+            else => {},
+        }
+        const line_clipped = line.items[0..byteLimitForDisplayWidth(line.items, panel_width - 2, terminal_tab_width)];
+        try out.appendSlice(line_clipped);
+        var pad = displayWidth(line_clipped, terminal_tab_width);
+        while (pad < panel_width - 2) : (pad += 1) try out.append(' ');
+        try out.appendSlice("\x1b[0m\x1b[38;5;240m|\x1b[0m");
+    }
+
+    try out.writer().print("\x1b[{d};{d}H\x1b[38;5;240m+\x1b[0m", .{ row + panel_height - 1, col });
+    x = 0;
+    while (x < panel_width - 2) : (x += 1) try out.append('-');
+    try out.appendSlice("+\x1b[0m");
+}
+
 const PopupAnchor = struct {
     row: usize,
     col: usize,
@@ -505,23 +704,140 @@ fn popupAnchor(
 }
 
 pub fn paletteMatches(self: anytype, allocator: std.mem.Allocator) !std.array_list.Managed(usize) {
+    const ScoredMatch = struct {
+        index: usize,
+        score: i32,
+    };
+
     var matches = std.array_list.Managed(usize).init(allocator);
+    var scored = std.array_list.Managed(ScoredMatch).init(allocator);
+    defer scored.deinit();
 
     const query = self.ui.palette.query.items;
-    if (query.len == 0) {
-        for (palette_entries, 0..) |_, index| {
-            try matches.append(index);
-        }
-        return matches;
+    switch (self.ui.palette.mode) {
+        .commands => {
+            if (query.len == 0) {
+                for (palette_entries, 0..) |_, index| {
+                    try matches.append(index);
+                }
+                return matches;
+            }
+
+            for (palette_entries, 0..) |entry, index| {
+                if (containsIgnoreCase(entry.label, query)) {
+                    try scored.append(.{ .index = index, .score = pathMatchScore(entry.label, query) });
+                }
+            }
+        },
+        .files => {
+            if (query.len == 0) {
+                const limit = @min(self.file_index.items.len, @as(usize, 128));
+                var i: usize = 0;
+                while (i < limit) : (i += 1) {
+                    try matches.append(i);
+                }
+                return matches;
+            }
+
+            for (self.file_index.items, 0..) |path, index| {
+                if (fuzzyPathQueryScore(path, query)) |score| {
+                    var rank = score;
+                    if (self.file_frecency.get(path)) |freq| {
+                        const visits_bonus = @as(i32, @intCast(@min(freq.visits, @as(u32, 64)))) * 3;
+                        rank -= visits_bonus;
+                        const age_ticks = if (self.file_access_tick > freq.last_tick)
+                            self.file_access_tick - freq.last_tick
+                        else
+                            0;
+                        if (age_ticks <= 2) {
+                            rank -= 24;
+                        } else if (age_ticks <= 8) {
+                            rank -= 16;
+                        } else if (age_ticks <= 32) {
+                            rank -= 8;
+                        }
+                    }
+                    try scored.append(.{ .index = index, .score = rank });
+                }
+            }
+        },
     }
 
-    for (palette_entries, 0..) |entry, index| {
-        if (containsIgnoreCase(entry.label, query)) {
-            try matches.append(index);
+    std.mem.sort(ScoredMatch, scored.items, {}, struct {
+        fn lessThan(_: void, lhs: ScoredMatch, rhs: ScoredMatch) bool {
+            if (lhs.score == rhs.score) return lhs.index < rhs.index;
+            return lhs.score < rhs.score;
         }
+    }.lessThan);
+
+    for (scored.items) |entry| {
+        try matches.append(entry.index);
     }
 
     return matches;
+}
+
+fn pathMatchScore(path: []const u8, query: []const u8) i32 {
+    var score: i32 = @intCast(path.len);
+
+    if (std.mem.endsWith(u8, path, query)) score -= 12;
+    if (std.mem.indexOf(u8, path, query)) |idx| {
+        score -= @divTrunc(@as(i32, @intCast(@min(idx, @as(usize, 256)))), 4);
+    }
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
+        if (slash + 1 < path.len and std.mem.indexOf(u8, path[slash + 1 ..], query) != null) {
+            score -= 16;
+        }
+    }
+
+    return score;
+}
+
+fn fuzzyPathQueryScore(path: []const u8, query: []const u8) ?i32 {
+    var score: i32 = @as(i32, @intCast(@min(path.len, @as(usize, 4096))));
+    const basename_start = (std.mem.lastIndexOfScalar(u8, path, '/') orelse 0) + @as(usize, 1);
+
+    var token_start: usize = 0;
+    var token_count: usize = 0;
+    while (true) {
+        while (token_start < query.len and std.ascii.isWhitespace(query[token_start])) : (token_start += 1) {}
+        if (token_start >= query.len) break;
+
+        var token_end = token_start;
+        while (token_end < query.len and !std.ascii.isWhitespace(query[token_end])) : (token_end += 1) {}
+        const token = query[token_start..token_end];
+        token_count += 1;
+
+        const idx = indexOfIgnoreCase(path, token) orelse return null;
+        score += @divTrunc(@as(i32, @intCast(@min(idx, @as(usize, 2048)))), 4);
+
+        if (idx >= basename_start) score -= 18;
+        if (idx == basename_start) score -= 12;
+        if (startsWithIgnoreCase(path[basename_start..], token)) score -= 10;
+
+        token_start = token_end;
+    }
+
+    if (token_count == 0) return null;
+    return score;
+}
+
+fn startsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    return std.ascii.eqlIgnoreCase(haystack[0..needle.len], needle);
+}
+
+fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) {
+            return i;
+        }
+    }
+    return null;
 }
 
 fn renderHighlighted(out: *std.array_list.Managed(u8), line: []const u8, spans: []const highlighter.Span) !void {
@@ -597,6 +913,7 @@ fn promptLabel(mode: PromptMode) []const u8 {
     return switch (mode) {
         .goto_line => " Goto line: ",
         .regex_search => " Regex: ",
+        .project_search => " Search: ",
     };
 }
 

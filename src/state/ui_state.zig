@@ -35,6 +35,7 @@ pub const LspPanelMode = enum {
     none,
     completion,
     references,
+    project_search,
 };
 
 pub const JumpLocation = struct {
@@ -45,6 +46,14 @@ pub const JumpLocation = struct {
 pub const PromptMode = enum {
     goto_line,
     regex_search,
+    project_search,
+};
+
+pub const ProjectSearchResult = struct {
+    path: []u8,
+    line: usize,
+    column: usize,
+    text: []u8,
 };
 
 pub const PromptState = struct {
@@ -77,13 +86,20 @@ pub const PromptState = struct {
 };
 
 pub const PaletteState = struct {
+    pub const Mode = enum {
+        commands,
+        files,
+    };
+
     active: bool,
+    mode: Mode,
     query: std.array_list.Managed(u8),
     selected: usize,
 
     pub fn init(allocator: std.mem.Allocator) PaletteState {
         return .{
             .active = false,
+            .mode = .commands,
             .query = std.array_list.Managed(u8).init(allocator),
             .selected = 0,
         };
@@ -108,6 +124,7 @@ pub const UiState = struct {
     needs_render: bool,
     lsp_spinner_frame: usize,
     perf_overlay_enabled: bool,
+    debug_panel_enabled: bool,
     perf_last_frame_ns: i128,
     perf_frame_samples: [perf_sample_capacity]u16,
     perf_sample_count: usize,
@@ -118,6 +135,9 @@ pub const UiState = struct {
     perf_ft_avg_tenths_ms: u16,
     perf_ft_p95_tenths_ms: u16,
     perf_ft_max_tenths_ms: u16,
+    file_open_last_ms: u32,
+    file_index_last_ms: u32,
+    file_index_count: usize,
     lsp_panel_mode: LspPanelMode,
     lsp_panel_selected: usize,
     lsp_completion_pending: bool,
@@ -136,6 +156,8 @@ pub const UiState = struct {
     lsp_hover_request_cursor: usize,
     lsp_hover_tooltip_active: bool,
     lsp_hover_tooltip_text: std.array_list.Managed(u8),
+    project_search_results: std.array_list.Managed(ProjectSearchResult),
+    project_search_query: std.array_list.Managed(u8),
     jump_stack: std.array_list.Managed(JumpLocation),
     palette: PaletteState,
     prompt: PromptState,
@@ -148,6 +170,7 @@ pub const UiState = struct {
             .needs_render = true,
             .lsp_spinner_frame = 0,
             .perf_overlay_enabled = perf_overlay_enabled,
+            .debug_panel_enabled = false,
             .perf_last_frame_ns = 0,
             .perf_frame_samples = [_]u16{0} ** perf_sample_capacity,
             .perf_sample_count = 0,
@@ -158,6 +181,9 @@ pub const UiState = struct {
             .perf_ft_avg_tenths_ms = 0,
             .perf_ft_p95_tenths_ms = 0,
             .perf_ft_max_tenths_ms = 0,
+            .file_open_last_ms = 0,
+            .file_index_last_ms = 0,
+            .file_index_count = 0,
             .lsp_panel_mode = .none,
             .lsp_panel_selected = 0,
             .lsp_completion_pending = false,
@@ -176,6 +202,8 @@ pub const UiState = struct {
             .lsp_hover_request_cursor = 0,
             .lsp_hover_tooltip_active = false,
             .lsp_hover_tooltip_text = std.array_list.Managed(u8).init(allocator),
+            .project_search_results = std.array_list.Managed(ProjectSearchResult).init(allocator),
+            .project_search_query = std.array_list.Managed(u8).init(allocator),
             .jump_stack = std.array_list.Managed(JumpLocation).init(allocator),
             .palette = PaletteState.init(allocator),
             .prompt = PromptState.init(allocator),
@@ -185,6 +213,12 @@ pub const UiState = struct {
     pub fn deinit(self: *UiState) void {
         self.prompt.deinit();
         self.palette.deinit();
+        for (self.project_search_results.items) |item| {
+            self.status.allocator.free(item.path);
+            self.status.allocator.free(item.text);
+        }
+        self.project_search_results.deinit();
+        self.project_search_query.deinit();
         self.lsp_hover_tooltip_text.deinit();
         self.jump_stack.deinit();
         self.status.deinit();

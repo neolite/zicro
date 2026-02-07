@@ -104,7 +104,8 @@ git push origin v0.2.0
 - `Ctrl+C`: copy selection
 - `Ctrl+K`: cut selection
 - `Ctrl+V`: paste
-- `Ctrl+P`: command palette
+- `Ctrl+P`: fast file finder (project files)
+- `Ctrl+Shift+P`: command palette
 - `Ctrl+G`: goto line
 - `Ctrl+F`: regex search prompt
 - `Ctrl+/`: toggle comment for line/selection
@@ -115,6 +116,7 @@ git push origin v0.2.0
 - `Ctrl+D`: LSP go-to-definition
 - `Ctrl+R`: LSP references panel
 - `Ctrl+O`: jump back after LSP jump
+- `Ctrl+W`: toggle info/debug panel
 - `Tab`: accept selected completion item when completion popup is open
 - Arrows/Home/End/PageUp/PageDown: navigation
 - `Shift+Arrows` + `Shift+Home/End/PageUp/PageDown`: linear selection
@@ -213,7 +215,7 @@ Example:
 `lsp.zig.enabled`: optional legacy toggle for Zig LSP adapter (`true | false`).
 `lsp.zig.command` + `args`: optional legacy override for builtin Zig adapter command.
 `lsp.zig.root_markers`: optional legacy override for Zig root detection.
-`lsp.adapters`: ordered custom adapter list. If `name` matches builtin adapter (`zig-zls`, `typescript-tsgo`, `typescript-npx-tsgo`, `typescript-tsls`, `bash-language-server`) it overrides it; otherwise adds a new adapter.
+`lsp.adapters`: ordered custom adapter list. If `name` matches builtin adapter (`zig-zls`, `typescript-tsgo`, `typescript-npx-tsgo`, `typescript-tsls`, `typescript-npx-tsls`, `bash-language-server`) it overrides it; otherwise adds a new adapter.
 `lsp.adapters[].language`: LSP `languageId` used in `didOpen`.
 `lsp.adapters[].priority`: candidate priority (`-1000..1000`), higher starts first.
 `lsp.adapters[].enabled`: disable/enable adapter without removing config.
@@ -235,6 +237,7 @@ For JS/TS in `auto` mode, `zicro` tries:
 1. `tsgo --lsp -stdio`
 2. `npx tsgo --lsp -stdio`
 3. `typescript-language-server --stdio`
+4. `npx typescript-language-server --stdio`
 
 `zicro` resolves binaries from project-local `node_modules/.bin` first, then `PATH`.
 

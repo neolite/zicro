@@ -1,6 +1,9 @@
 const std = @import("std");
 const presets = @import("presets.zig");
 const Config = @import("../config.zig").Config;
+const TypescriptLspConfig = @import("../config.zig").TypescriptLspConfig;
+const BasicLspConfig = @import("../config.zig").BasicLspConfig;
+const LspAdapterConfig = @import("../config.zig").LspAdapterConfig;
 
 const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
 const diagnostics_request_timeout_ns: i128 = 1500 * std.time.ns_per_ms;
@@ -464,10 +467,12 @@ pub const Client = struct {
         return switch (config.lsp_typescript.mode) {
             .auto => std.mem.eql(u8, preset_name, "typescript-tsgo") or
                 std.mem.eql(u8, preset_name, "typescript-npx-tsgo") or
-                std.mem.eql(u8, preset_name, "typescript-tsls"),
+                std.mem.eql(u8, preset_name, "typescript-tsls") or
+                std.mem.eql(u8, preset_name, "typescript-npx-tsls"),
             .tsgo => std.mem.eql(u8, preset_name, "typescript-tsgo") or
                 std.mem.eql(u8, preset_name, "typescript-npx-tsgo"),
-            .tsls => std.mem.eql(u8, preset_name, "typescript-tsls"),
+            .tsls => std.mem.eql(u8, preset_name, "typescript-tsls") or
+                std.mem.eql(u8, preset_name, "typescript-npx-tsls"),
         };
     }
 
@@ -2392,6 +2397,67 @@ test "typescript family language id uses jsx tsx variants" {
         "zig",
         languageIdForFilePath("main.zig", "zig"),
     );
+}
+
+test "typescript preset allowlist includes npx tsls fallback" {
+    const allocator = std.testing.allocator;
+    var auto_cfg = Config{
+        .allocator = allocator,
+        .tab_width = 4,
+        .autosave = false,
+        .ui_perf_overlay = false,
+        .enable_lsp = true,
+        .lsp_change_debounce_ms = 32,
+        .lsp_did_save_debounce_ms = 64,
+        .lsp_completion_auto = true,
+        .lsp_completion_debounce_ms = 48,
+        .lsp_completion_min_prefix_len = 1,
+        .lsp_completion_trigger_on_dot = true,
+        .lsp_completion_trigger_on_letters = true,
+        .lsp_hover_auto = true,
+        .lsp_hover_debounce_ms = 140,
+        .lsp_hover_show_mode = .tooltip,
+        .lsp_hover_hide_on_type = true,
+        .lsp_tooltip_max_width = 72,
+        .lsp_tooltip_max_rows = 10,
+        .lsp_typescript = TypescriptLspConfig.init(allocator),
+        .lsp_zig = BasicLspConfig.init(allocator),
+        .lsp_adapters = std.array_list.Managed(LspAdapterConfig).init(allocator),
+    };
+    defer auto_cfg.deinit();
+    try std.testing.expect(Client.allowTypescriptPreset(&auto_cfg, "typescript-tsgo"));
+    try std.testing.expect(Client.allowTypescriptPreset(&auto_cfg, "typescript-npx-tsgo"));
+    try std.testing.expect(Client.allowTypescriptPreset(&auto_cfg, "typescript-tsls"));
+    try std.testing.expect(Client.allowTypescriptPreset(&auto_cfg, "typescript-npx-tsls"));
+
+    var tsls_cfg = Config{
+        .allocator = allocator,
+        .tab_width = 4,
+        .autosave = false,
+        .ui_perf_overlay = false,
+        .enable_lsp = true,
+        .lsp_change_debounce_ms = 32,
+        .lsp_did_save_debounce_ms = 64,
+        .lsp_completion_auto = true,
+        .lsp_completion_debounce_ms = 48,
+        .lsp_completion_min_prefix_len = 1,
+        .lsp_completion_trigger_on_dot = true,
+        .lsp_completion_trigger_on_letters = true,
+        .lsp_hover_auto = true,
+        .lsp_hover_debounce_ms = 140,
+        .lsp_hover_show_mode = .tooltip,
+        .lsp_hover_hide_on_type = true,
+        .lsp_tooltip_max_width = 72,
+        .lsp_tooltip_max_rows = 10,
+        .lsp_typescript = TypescriptLspConfig.init(allocator),
+        .lsp_zig = BasicLspConfig.init(allocator),
+        .lsp_adapters = std.array_list.Managed(LspAdapterConfig).init(allocator),
+    };
+    defer tsls_cfg.deinit();
+    tsls_cfg.lsp_typescript.mode = .tsls;
+    try std.testing.expect(!Client.allowTypescriptPreset(&tsls_cfg, "typescript-tsgo"));
+    try std.testing.expect(Client.allowTypescriptPreset(&tsls_cfg, "typescript-tsls"));
+    try std.testing.expect(Client.allowTypescriptPreset(&tsls_cfg, "typescript-npx-tsls"));
 }
 
 fn resolveArgv(allocator: std.mem.Allocator, root_path: []const u8, command: []const []const u8) ![]const []const u8 {
