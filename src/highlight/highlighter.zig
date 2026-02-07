@@ -318,6 +318,15 @@ fn scanLine(
             continue;
         }
 
+        if (is_bash) {
+            const op_end = scanBashOperator(line, i);
+            if (op_end > i) {
+                try appendSpan(spans_opt, i, op_end, .operator);
+                i = op_end;
+                continue;
+            }
+        }
+
         if (is_js_ts and state.in_template_string and state.template_expr_depth > 0) {
             if (ch == '{') {
                 state.template_expr_depth += 1;
@@ -487,6 +496,38 @@ fn isBashWordBoundary(ch: u8) bool {
         ';', '&', '|', '<', '>', '(', ')' => true,
         else => false,
     };
+}
+
+fn scanBashOperator(line: []const u8, index: usize) usize {
+    if (index >= line.len) return index;
+
+    const remaining = line[index..];
+    const triples = [_][]const u8{
+        "&>>",
+        ";;&",
+    };
+    inline for (triples) |op| {
+        if (std.mem.startsWith(u8, remaining, op)) return index + op.len;
+    }
+
+    const doubles = [_][]const u8{
+        "&&",
+        "||",
+        ">>",
+        ";;",
+        ";&",
+        "|&",
+        "&>",
+        ">&",
+        "<&",
+        "<>",
+        ">|",
+    };
+    inline for (doubles) |op| {
+        if (std.mem.startsWith(u8, remaining, op)) return index + op.len;
+    }
+
+    return if (isOperator(line[index])) index + 1 else index;
 }
 
 fn scanJsxTag(
@@ -932,4 +973,17 @@ test "bash here-string does not enter heredoc mode" {
     defer allocator.free(line.spans);
     try std.testing.expect(!line.next_state.in_heredoc);
     try std.testing.expect(hasTokenSpan(line.spans, .operator, 5, 8));
+}
+
+test "bash multi-char operators are grouped into single spans" {
+    const allocator = std.testing.allocator;
+
+    const line = try highlightLine(allocator, .bash, "cmd1 && cmd2 || cmd3 2>>out >&2 |& tee");
+    defer allocator.free(line);
+
+    try std.testing.expect(hasTokenSpan(line, .operator, 5, 7)); // &&
+    try std.testing.expect(hasTokenSpan(line, .operator, 13, 15)); // ||
+    try std.testing.expect(hasTokenSpan(line, .operator, 22, 24)); // >>
+    try std.testing.expect(hasTokenSpan(line, .operator, 28, 30)); // >&
+    try std.testing.expect(hasTokenSpan(line, .operator, 32, 34)); // |&
 }

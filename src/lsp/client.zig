@@ -6,7 +6,7 @@ const BasicLspConfig = @import("../config.zig").BasicLspConfig;
 const LspAdapterConfig = @import("../config.zig").LspAdapterConfig;
 
 const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
-const diagnostics_request_timeout_ns: i128 = 1500 * std.time.ns_per_ms;
+const diagnostics_request_timeout_ns: i128 = 5000 * std.time.ns_per_ms;
 const max_payloads_per_poll: usize = 24;
 const fallback_root_markers = [_][]const u8{".git"};
 
@@ -64,6 +64,7 @@ pub const CapabilitiesSnapshot = struct {
     hover: bool,
     definition: bool,
     references: bool,
+    pull_diagnostics: bool,
 };
 
 const ChangeMode = enum {
@@ -112,6 +113,7 @@ pub const Client = struct {
     initialize_request_id: ?u64,
     diagnostics_request_id: ?u64,
     diagnostics_request_started_ns: i128,
+    diagnostics_request_queued: bool,
     completion_request_id: ?u64,
     completion_request_started_ns: i128,
     hover_request_id: ?u64,
@@ -165,6 +167,7 @@ pub const Client = struct {
             .initialize_request_id = null,
             .diagnostics_request_id = null,
             .diagnostics_request_started_ns = 0,
+            .diagnostics_request_queued = false,
             .completion_request_id = null,
             .completion_request_started_ns = 0,
             .hover_request_id = null,
@@ -233,6 +236,7 @@ pub const Client = struct {
         self.initialize_request_id = null;
         self.diagnostics_request_id = null;
         self.diagnostics_request_started_ns = 0;
+        self.diagnostics_request_queued = false;
         self.completion_request_id = null;
         self.completion_request_started_ns = 0;
         self.hover_request_id = null;
@@ -672,6 +676,7 @@ pub const Client = struct {
             .hover = self.supports_hover,
             .definition = self.supports_definition,
             .references = self.supports_references,
+            .pull_diagnostics = self.supports_pull_diagnostics,
         };
     }
 
@@ -1144,6 +1149,7 @@ pub const Client = struct {
         self.supports_hover = feature_caps.hover;
         self.supports_definition = feature_caps.definition;
         self.supports_references = feature_caps.references;
+        _ = feature_caps.pull_diagnostics;
 
         try self.sendInitialized();
         self.session_ready = true;
@@ -1164,7 +1170,10 @@ pub const Client = struct {
     fn requestDiagnostics(self: *Client) !void {
         if (!self.enabled or !self.session_ready) return;
         if (!self.supports_pull_diagnostics) return;
-        if (self.diagnostics_request_id != null) return;
+        if (self.diagnostics_request_id != null) {
+            self.diagnostics_request_queued = true;
+            return;
+        }
         const uri = self.document_uri orelse return;
 
         const params = .{
@@ -1173,6 +1182,7 @@ pub const Client = struct {
 
         self.diagnostics_request_id = try self.sendRequest("textDocument/diagnostic", params);
         self.diagnostics_request_started_ns = std.time.nanoTimestamp();
+        self.diagnostics_request_queued = false;
     }
 
     fn handleDiagnosticResponse(self: *Client, object: std.json.ObjectMap) !bool {
@@ -1182,17 +1192,12 @@ pub const Client = struct {
         if (id_value.integer < 0) return false;
         const response_id: u64 = @intCast(id_value.integer);
         if (response_id != request_id) return false;
-
-        self.clearPendingDiagnosticRequest();
+        defer self.clearPendingDiagnosticRequest();
 
         if (object.get("error")) |error_value| {
             if (error_value != .null) {
-                if (error_value == .object) {
-                    if (error_value.object.get("code")) |code_value| {
-                        if (code_value == .integer and code_value.integer == -32601) {
-                            self.supports_pull_diagnostics = false;
-                        }
-                    }
+                if (errorDisablesPullDiagnostics(error_value)) {
+                    self.supports_pull_diagnostics = false;
                 }
                 return false;
             }
@@ -1388,7 +1393,7 @@ pub const Client = struct {
             if (request_id == response_id) {
                 if (has_error) {
                     if (object.get("error")) |error_value| {
-                        if (error_value != .null) {
+                        if (errorDisablesPullDiagnostics(error_value)) {
                             self.supports_pull_diagnostics = false;
                         }
                     }
@@ -1410,6 +1415,12 @@ pub const Client = struct {
         self.diagnostics_request_id = null;
         self.diagnostics_request_started_ns = 0;
         self.decrementPendingRequests();
+
+        const should_requeue = self.diagnostics_request_queued;
+        self.diagnostics_request_queued = false;
+        if (should_requeue and self.supports_pull_diagnostics and self.enabled and self.session_ready) {
+            self.requestDiagnostics() catch {};
+        }
     }
 
     fn maybeExpireDiagnosticRequest(self: *Client) void {
@@ -1417,8 +1428,6 @@ pub const Client = struct {
         if (self.diagnostics_request_started_ns == 0) return;
         const now = std.time.nanoTimestamp();
         if (now - self.diagnostics_request_started_ns < diagnostics_request_timeout_ns) return;
-
-        self.supports_pull_diagnostics = false;
         self.clearPendingDiagnosticRequest();
     }
 
@@ -2043,6 +2052,7 @@ fn parseLspFeatureCapabilities(object: std.json.ObjectMap) CapabilitiesSnapshot 
         .hover = false,
         .definition = false,
         .references = false,
+        .pull_diagnostics = false,
     };
 
     const result_value = object.get("result") orelse return out;
@@ -2054,6 +2064,7 @@ fn parseLspFeatureCapabilities(object: std.json.ObjectMap) CapabilitiesSnapshot 
     out.hover = hasCapability(capabilities_value.object.get("hoverProvider"));
     out.definition = hasCapability(capabilities_value.object.get("definitionProvider"));
     out.references = hasCapability(capabilities_value.object.get("referencesProvider"));
+    out.pull_diagnostics = hasCapability(capabilities_value.object.get("diagnosticProvider"));
     return out;
 }
 
@@ -2065,6 +2076,13 @@ fn hasCapability(value: ?std.json.Value) bool {
         .object => true,
         else => false,
     };
+}
+
+fn errorDisablesPullDiagnostics(error_value: std.json.Value) bool {
+    if (error_value != .object) return false;
+    const code_value = error_value.object.get("code") orelse return false;
+    if (code_value != .integer) return false;
+    return code_value.integer == -32601;
 }
 
 fn languageIdForFilePath(path: []const u8, server_language_id: []const u8) []const u8 {
@@ -2194,7 +2212,7 @@ test "extractQuotedSymbol parses lint variable name" {
     try std.testing.expectEqualStrings("", extractQuotedSymbol("no quoted symbol"));
 }
 
-test "pending diagnostics request expires and clears" {
+test "pending diagnostics request expires and clears without disabling pull support" {
     const allocator = std.testing.allocator;
     var client = Client.init(allocator);
     defer client.deinit();
@@ -2208,7 +2226,40 @@ test "pending diagnostics request expires and clears" {
 
     try std.testing.expect(client.diagnostics_request_id == null);
     try std.testing.expectEqual(@as(usize, 0), client.pending_requests);
-    try std.testing.expect(!client.supports_pull_diagnostics);
+    try std.testing.expect(client.supports_pull_diagnostics);
+}
+
+test "requestDiagnostics queues follow-up while pending" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    client.enabled = true;
+    client.session_ready = true;
+    client.supports_pull_diagnostics = true;
+    client.diagnostics_request_id = 7;
+
+    try client.requestDiagnostics();
+    try std.testing.expect(client.diagnostics_request_queued);
+}
+
+test "clearPendingDiagnosticRequest resets queued flag without re-request when inactive" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    client.enabled = false;
+    client.session_ready = false;
+    client.supports_pull_diagnostics = true;
+    client.pending_requests = 1;
+    client.diagnostics_request_id = 9;
+    client.diagnostics_request_started_ns = std.time.nanoTimestamp();
+    client.diagnostics_request_queued = true;
+
+    client.clearPendingDiagnosticRequest();
+    try std.testing.expect(client.diagnostics_request_id == null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_requests);
+    try std.testing.expect(!client.diagnostics_request_queued);
 }
 
 test "parse feature capabilities from initialize response" {
@@ -2221,7 +2272,10 @@ test "parse feature capabilities from initialize response" {
         \\      "completionProvider": { "triggerCharacters": ["."] },
         \\      "hoverProvider": true,
         \\      "definitionProvider": true,
-        \\      "referencesProvider": true
+        \\      "referencesProvider": true,
+        \\      "diagnosticProvider": {
+        \\        "identifier": "ts"
+        \\      }
         \\    }
         \\  }
         \\}
@@ -2236,6 +2290,29 @@ test "parse feature capabilities from initialize response" {
     try std.testing.expect(caps.hover);
     try std.testing.expect(caps.definition);
     try std.testing.expect(caps.references);
+    try std.testing.expect(caps.pull_diagnostics);
+}
+
+test "parse feature capabilities defaults pull diagnostics to false" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\{
+        \\  "id": 1,
+        \\  "result": {
+        \\    "capabilities": {
+        \\      "completionProvider": true
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .object);
+    const caps = parseLspFeatureCapabilities(parsed.value.object);
+    try std.testing.expect(caps.completion);
+    try std.testing.expect(!caps.pull_diagnostics);
 }
 
 test "parse text edit supports both range and replace fields" {
