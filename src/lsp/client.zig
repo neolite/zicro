@@ -99,6 +99,7 @@ pub const Client = struct {
     next_id: u64,
     version: i64,
     server_name: []const u8,
+    document_language_id: []const u8,
     pending_requests: usize,
     pending_since_ns: i128,
     last_latency_ms: u32,
@@ -151,6 +152,7 @@ pub const Client = struct {
             .next_id = 1,
             .version = 1,
             .server_name = "off",
+            .document_language_id = "plaintext",
             .pending_requests = 0,
             .pending_since_ns = 0,
             .last_latency_ms = 0,
@@ -246,6 +248,7 @@ pub const Client = struct {
         self.did_save_pulse_queued = false;
         self.bootstrap_saved = false;
         self.server_name = "off";
+        self.document_language_id = "plaintext";
         self.recv_buffer.clearRetainingCapacity();
         self.clearCompletionItems();
         self.hover_text.clearRetainingCapacity();
@@ -327,6 +330,7 @@ pub const Client = struct {
         self.supports_pull_diagnostics = true;
         self.next_did_save_pulse_ns = 0;
         self.server_name = server_name;
+        self.document_language_id = languageIdForFilePath(file_path, server_name);
         self.version = 1;
 
         if (self.document_uri) |uri| self.allocator.free(uri);
@@ -715,7 +719,7 @@ pub const Client = struct {
         const params = .{
             .textDocument = .{
                 .uri = uri,
-                .languageId = self.server_name,
+                .languageId = self.document_language_id,
                 .version = self.version,
                 .text = text,
             },
@@ -2058,6 +2062,21 @@ fn hasCapability(value: ?std.json.Value) bool {
     };
 }
 
+fn languageIdForFilePath(path: []const u8, server_language_id: []const u8) []const u8 {
+    if (!std.mem.eql(u8, server_language_id, "typescript")) return server_language_id;
+
+    const ext = std.fs.path.extension(path);
+    if (std.mem.eql(u8, ext, ".tsx")) return "typescriptreact";
+    if (std.mem.eql(u8, ext, ".ts")) return "typescript";
+    if (std.mem.eql(u8, ext, ".mts")) return "typescript";
+    if (std.mem.eql(u8, ext, ".cts")) return "typescript";
+    if (std.mem.eql(u8, ext, ".jsx")) return "javascriptreact";
+    if (std.mem.eql(u8, ext, ".js")) return "javascript";
+    if (std.mem.eql(u8, ext, ".mjs")) return "javascript";
+    if (std.mem.eql(u8, ext, ".cjs")) return "javascript";
+    return server_language_id;
+}
+
 fn nsToMs(value_ns: i128) u32 {
     if (value_ns <= 0) return 0;
     const value_u128: u128 = @intCast(value_ns);
@@ -2350,6 +2369,29 @@ test "didSave pulse is trailing debounced" {
     client.next_did_save_pulse_ns = std.time.nanoTimestamp() - 1;
     try client.maybeDispatchDidSavePulse();
     try std.testing.expect(!client.did_save_pulse_queued);
+}
+
+test "typescript family language id uses jsx tsx variants" {
+    try std.testing.expectEqualStrings(
+        "typescriptreact",
+        languageIdForFilePath("index.tsx", "typescript"),
+    );
+    try std.testing.expectEqualStrings(
+        "javascriptreact",
+        languageIdForFilePath("index.jsx", "typescript"),
+    );
+    try std.testing.expectEqualStrings(
+        "typescript",
+        languageIdForFilePath("index.ts", "typescript"),
+    );
+    try std.testing.expectEqualStrings(
+        "javascript",
+        languageIdForFilePath("index.js", "typescript"),
+    );
+    try std.testing.expectEqualStrings(
+        "zig",
+        languageIdForFilePath("main.zig", "zig"),
+    );
 }
 
 fn resolveArgv(allocator: std.mem.Allocator, root_path: []const u8, command: []const []const u8) ![]const []const u8 {

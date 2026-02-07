@@ -48,6 +48,7 @@ Phase 2 notes:
 - [x] Implement hover requests and inline/panel rendering.
 - [x] Implement go-to-definition navigation flow.
 - [x] Implement references navigation (or queue behind definition if blocked).
+- [x] Add cross-file jump support for definition/references targets.
 - [x] Add keybindings and fallback behavior for unavailable capabilities.
 - [x] Add protocol tests for request/response parsing and routing.
 
@@ -56,11 +57,16 @@ Phase 3 notes:
 - 2026-02-07: Added capability-aware fallbacks and protocol parser tests (capabilities, textEdit, location, hover payloads).
 
 ## Phase 4 - Syntax Highlighting Upgrade
-- [ ] Add multiline block comment support (`/* ... */`) for JS/TS.
-- [ ] Add template literal handling for JS/TS.
+- [x] Add multiline block comment support (`/* ... */`) for JS/TS.
+- [x] Add template literal handling for JS/TS.
 - [ ] Add heredoc handling for shell-like languages where applicable.
-- [ ] Replace linear keyword lookup with `ComptimeStringMap` where suitable.
-- [ ] Add tokenizer regression tests for multiline edge cases.
+- [x] Replace linear keyword lookup with `ComptimeStringMap` where suitable.
+- [x] Add tokenizer regression tests for multiline edge cases.
+
+Phase 4 notes:
+- 2026-02-07: Added stateful multiline highlighter for JS/TS (`/* ... */` and template literals with `${...}` cross-line state).
+- 2026-02-07: Replaced linear keyword matching with `std.StaticStringMap` and added multiline regression tests.
+- 2026-02-07: Added cross-file LSP jump + path-aware jump-back stack (guard: switching files is blocked while current buffer is dirty).
 
 ## Phase 5 - Editing Model Enhancements
 - [ ] Implement true multi-cursor model (multiple carets, not only block selection).

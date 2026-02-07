@@ -37,6 +37,11 @@ pub const LspPanelMode = enum {
     references,
 };
 
+pub const JumpLocation = struct {
+    path: []u8,
+    offset: usize,
+};
+
 pub const PromptMode = enum {
     goto_line,
     regex_search,
@@ -131,7 +136,7 @@ pub const UiState = struct {
     lsp_hover_request_cursor: usize,
     lsp_hover_tooltip_active: bool,
     lsp_hover_tooltip_text: std.array_list.Managed(u8),
-    jump_stack: std.array_list.Managed(usize),
+    jump_stack: std.array_list.Managed(JumpLocation),
     palette: PaletteState,
     prompt: PromptState,
 
@@ -171,7 +176,7 @@ pub const UiState = struct {
             .lsp_hover_request_cursor = 0,
             .lsp_hover_tooltip_active = false,
             .lsp_hover_tooltip_text = std.array_list.Managed(u8).init(allocator),
-            .jump_stack = std.array_list.Managed(usize).init(allocator),
+            .jump_stack = std.array_list.Managed(JumpLocation).init(allocator),
             .palette = PaletteState.init(allocator),
             .prompt = PromptState.init(allocator),
         };

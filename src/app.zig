@@ -24,6 +24,7 @@ const PromptMode = ui_state.PromptMode;
 const PaletteAction = ui_state.PaletteAction;
 const palette_entries = ui_state.palette_entries;
 const LspPanelMode = ui_state.LspPanelMode;
+const JumpLocation = ui_state.JumpLocation;
 const LspState = lsp_state.LspState;
 const LspChangePosition = lsp_state.LspChangePosition;
 const LspPosition = LspClient.LspPosition;
@@ -49,6 +50,7 @@ pub const App = struct {
     editor: EditorState,
     ui: UiState,
     lsp_state: LspState,
+    highlight_state_cache: std.array_list.Managed(highlighter.LineState),
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, file_path_opt: ?[]const u8) !App {
         const file_bytes = if (file_path_opt) |path|
@@ -84,7 +86,10 @@ pub const App = struct {
                 allocator,
                 @as(i128, @intCast(config.lsp_change_debounce_ms)) * std.time.ns_per_ms,
             ),
+            .highlight_state_cache = std.array_list.Managed(highlighter.LineState).init(allocator),
         };
+
+        try app.resetHighlightCache();
 
         app.lsp_state.client.setDidSavePulseDebounceMs(config.lsp_did_save_debounce_ms);
 
@@ -105,9 +110,13 @@ pub const App = struct {
         self.clearPendingLspChanges();
         self.lsp_state.pending_lsp_changes.deinit();
         self.lsp_state.client.deinit();
+        for (self.ui.jump_stack.items) |entry| {
+            self.allocator.free(entry.path);
+        }
         self.ui.deinit();
         self.editor.buffer.deinit();
         if (self.editor.file_path) |path| self.allocator.free(path);
+        self.highlight_state_cache.deinit();
         self.terminal.deinit();
     }
 
@@ -770,7 +779,25 @@ pub const App = struct {
         }
 
         const target = self.ui.jump_stack.pop().?;
-        self.editor.cursor = @min(target, self.editor.buffer.len());
+        defer self.allocator.free(target.path);
+
+        const current_path = self.editor.file_path orelse "";
+        if (current_path.len > 0 and std.mem.eql(u8, current_path, target.path)) {
+            self.editor.cursor = @min(target.offset, self.editor.buffer.len());
+            self.clearSelection();
+            self.centerCursorInViewport();
+            self.editor.preferred_visual_col = null;
+            try self.setStatus("Jumped back");
+            return;
+        }
+
+        if (self.editor.dirty) {
+            try self.setStatus("Jump back blocked: save current file first");
+            return;
+        }
+
+        try self.openFilePath(target.path);
+        self.editor.cursor = @min(target.offset, self.editor.buffer.len());
         self.clearSelection();
         self.centerCursorInViewport();
         self.editor.preferred_visual_col = null;
@@ -815,13 +842,23 @@ pub const App = struct {
     }
 
     fn jumpToLocation(self: *App, location: LocationItem, push_current: bool) !void {
-        if (!location.same_document) {
-            try self.setStatus("Cross-file jump not supported yet");
-            return;
-        }
-
         if (push_current) {
             try self.pushJumpLocation(self.editor.cursor);
+        }
+
+        if (!location.same_document) {
+            if (self.editor.dirty) {
+                try self.setStatus("Cross-file jump blocked: save current file first");
+                return;
+            }
+
+            const path = filePathFromUriAlloc(self.allocator, location.uri) catch {
+                try self.setStatus("Cross-file jump failed: unsupported URI");
+                return;
+            };
+            defer self.allocator.free(path);
+
+            try self.openFilePath(path);
         }
 
         const offset = self.offsetFromLspPosition(location.line, location.character);
@@ -834,15 +871,55 @@ pub const App = struct {
 
     fn pushJumpLocation(self: *App, offset: usize) !void {
         const max_jump_stack: usize = 256;
+        const path = self.editor.file_path orelse return;
         const clamped = @min(offset, self.editor.buffer.len());
         if (self.ui.jump_stack.items.len > 0) {
             const last = self.ui.jump_stack.items[self.ui.jump_stack.items.len - 1];
-            if (last == clamped) return;
+            if (last.offset == clamped and std.mem.eql(u8, last.path, path)) return;
         }
         if (self.ui.jump_stack.items.len >= max_jump_stack) {
-            _ = self.ui.jump_stack.orderedRemove(0);
+            const removed = self.ui.jump_stack.orderedRemove(0);
+            self.allocator.free(removed.path);
         }
-        try self.ui.jump_stack.append(clamped);
+        try self.ui.jump_stack.append(.{
+            .path = try self.allocator.dupe(u8, path),
+            .offset = clamped,
+        });
+    }
+
+    fn openFilePath(self: *App, path: []const u8) !void {
+        const file_bytes = try readFileAllocAnyPath(self.allocator, path, max_open_file_bytes);
+        defer self.allocator.free(file_bytes);
+
+        var new_buffer = try Buffer.fromBytes(self.allocator, file_bytes);
+        errdefer new_buffer.deinit();
+
+        if (self.editor.file_path) |old_path| self.allocator.free(old_path);
+        self.editor.file_path = try self.allocator.dupe(u8, path);
+
+        self.editor.buffer.deinit();
+        self.editor.buffer = new_buffer;
+        self.editor.cursor = 0;
+        self.editor.selection_anchor = null;
+        self.editor.selection_mode = .linear;
+        self.editor.search_match = null;
+        self.editor.scroll_y = 0;
+        self.editor.dirty = false;
+        self.editor.confirm_quit = false;
+        self.editor.preferred_visual_col = null;
+        self.editor.language = highlighter.detectLanguage(self.editor.file_path);
+
+        try self.resetHighlightCache();
+
+        self.clearPendingLspChanges();
+        self.lsp_state.pending_lsp_sync = false;
+        self.lsp_state.force_full_lsp_sync = false;
+        self.lsp_state.client.stop();
+        self.resetLspUiState();
+
+        if (self.config.enable_lsp and self.editor.file_path != null) {
+            self.lsp_state.client.startForFile(self.editor.file_path.?, self.config) catch {};
+        }
     }
 
     fn executeCommand(self: *App, command: Command) !void {
@@ -1597,6 +1674,7 @@ pub const App = struct {
         self.editor.dirty = true;
         self.editor.confirm_quit = false;
         self.editor.search_match = null;
+        self.invalidateHighlightCacheFromCursor();
         if (self.config.lsp_hover_hide_on_type) {
             self.clearHoverTooltip();
         }
@@ -1733,6 +1811,50 @@ pub const App = struct {
         return false;
     }
 
+    fn resetHighlightCache(self: *App) !void {
+        self.highlight_state_cache.clearRetainingCapacity();
+        try self.highlight_state_cache.append(highlighter.emptyState());
+    }
+
+    fn invalidateHighlightCacheFromCursor(self: *App) void {
+        const line = self.editor.buffer.lineColFromOffset(self.editor.cursor).line;
+        self.invalidateHighlightCacheFromLine(line);
+    }
+
+    fn invalidateHighlightCacheFromLine(self: *App, line: usize) void {
+        const keep = @min(line + 1, self.highlight_state_cache.items.len);
+        self.highlight_state_cache.items.len = keep;
+        if (self.highlight_state_cache.items.len == 0) {
+            self.highlight_state_cache.append(highlighter.emptyState()) catch {};
+        }
+    }
+
+    pub fn highlightStateForLine(self: *App, line: usize, allocator: std.mem.Allocator) !highlighter.LineState {
+        const target_line = @min(line, self.editor.buffer.lineCount());
+        while (self.highlight_state_cache.items.len <= target_line) {
+            const known_line = self.highlight_state_cache.items.len - 1;
+            const state_in = self.highlight_state_cache.items[known_line];
+            const line_text = try self.editor.buffer.lineOwned(allocator, known_line);
+            const next = highlighter.advanceState(self.editor.language, line_text, state_in);
+            try self.highlight_state_cache.append(next);
+        }
+        return self.highlight_state_cache.items[target_line];
+    }
+
+    pub fn cacheHighlightStateForNextLine(self: *App, next_line: usize, state: highlighter.LineState) void {
+        if (self.highlight_state_cache.items.len == next_line) {
+            self.highlight_state_cache.append(state) catch {};
+            return;
+        }
+
+        if (next_line < self.highlight_state_cache.items.len) {
+            if (!std.meta.eql(self.highlight_state_cache.items[next_line], state)) {
+                self.highlight_state_cache.items[next_line] = state;
+                self.highlight_state_cache.items.len = next_line + 1;
+            }
+        }
+    }
+
     fn queueIncrementalChange(self: *App, start_offset: usize, end_offset: usize, text: []const u8) !void {
         try app_lsp_sync.queueIncrementalChange(self, start_offset, end_offset, text);
     }
@@ -1840,8 +1962,14 @@ pub const App = struct {
         try app_ui_renderer.render(self, top_bar_rows, footer_rows, line_gutter_cols, terminal_tab_width);
     }
 
-    fn renderLine(self: *App, out: *std.array_list.Managed(u8), line_index: usize, frame_allocator: std.mem.Allocator) !void {
-        try app_ui_renderer.renderLine(self, out, line_index, frame_allocator, line_gutter_cols, terminal_tab_width);
+    fn renderLine(
+        self: *App,
+        out: *std.array_list.Managed(u8),
+        line_index: usize,
+        line_state: highlighter.LineState,
+        frame_allocator: std.mem.Allocator,
+    ) !highlighter.LineState {
+        return try app_ui_renderer.renderLine(self, out, line_index, line_state, frame_allocator, line_gutter_cols, terminal_tab_width);
     }
 
     fn renderDiagnosticsBar(self: *App, out: *std.array_list.Managed(u8), frame_allocator: std.mem.Allocator) !void {
@@ -1918,6 +2046,54 @@ fn completionSuffix(insert_text: []const u8, typed_prefix: []const u8) ?[]const 
     if (typed_prefix.len == 0) return null;
     if (!std.mem.startsWith(u8, insert_text, typed_prefix)) return null;
     return insert_text[typed_prefix.len..];
+}
+
+fn readFileAllocAnyPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+        return try file.readToEndAlloc(allocator, max_bytes);
+    }
+    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+}
+
+fn filePathFromUriAlloc(allocator: std.mem.Allocator, uri: []const u8) ![]u8 {
+    if (!std.mem.startsWith(u8, uri, "file://")) return error.UnsupportedUri;
+
+    var start: usize = 7;
+    if (start < uri.len and uri[start] != '/') {
+        const slash = std.mem.indexOfScalarPos(u8, uri, start, '/') orelse return error.UnsupportedUri;
+        start = slash;
+    }
+
+    const encoded_path = uri[start..];
+    var decoded = std.array_list.Managed(u8).init(allocator);
+    errdefer decoded.deinit();
+
+    var i: usize = 0;
+    while (i < encoded_path.len) {
+        if (encoded_path[i] == '%' and i + 2 < encoded_path.len) {
+            const hi = std.fmt.charToDigit(encoded_path[i + 1], 16) catch {
+                try decoded.append(encoded_path[i]);
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(encoded_path[i + 2], 16) catch {
+                try decoded.append(encoded_path[i]);
+                i += 1;
+                continue;
+            };
+            const value: u8 = @intCast(hi * 16 + lo);
+            try decoded.append(value);
+            i += 3;
+            continue;
+        }
+
+        try decoded.append(encoded_path[i]);
+        i += 1;
+    }
+
+    return decoded.toOwnedSlice();
 }
 
 fn regexMatchInLine(regex: *c.regex_t, line: []const u8, min_col: usize, allocator: std.mem.Allocator) !?ByteRange {
@@ -1999,4 +2175,12 @@ test "completion suffix uses typed prefix" {
     try std.testing.expectEqualStrings("sole", suffix);
     try std.testing.expectEqual(@as(?[]const u8, null), completionSuffix("sole", "con"));
     try std.testing.expectEqual(@as(?[]const u8, null), completionSuffix("console", ""));
+}
+
+test "file URI decode handles percent escapes" {
+    const allocator = std.testing.allocator;
+    const path = try filePathFromUriAlloc(allocator, "file:///tmp/hello%20world.ts");
+    defer allocator.free(path);
+
+    try std.testing.expectEqualStrings("/tmp/hello world.ts", path);
 }

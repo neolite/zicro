@@ -6,8 +6,8 @@ Scope: this file applies to the repository root and all subdirectories, except w
 - Roadmap and task status live in `TASKS.md`.
 
 ## Current Focus
-- Phase 4: syntax highlighting quality upgrades (multiline comments/strings and keyword lookup optimization).
-- Keep Phase 3 LSP UX stable (completion/hover/definition/references and jump-back flow).
+- Phase 4: finish remaining syntax highlighting work (heredoc handling and tokenizer edge cases).
+- Keep Phase 3 LSP UX stable (completion/hover/definition/references with cross-file jump and jump-back).
 - Preserve compatibility with existing `.zicro.json` keys while extending schema.
 
 ## Work Rules

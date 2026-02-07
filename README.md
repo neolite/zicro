@@ -11,6 +11,9 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
 
 - Piece-table buffer with undo/redo and UTF-8 safe cursor movement.
 - Syntax highlighting for Zig, JavaScript/TypeScript, Bash, JSON.
+- Stateful JS/TS multiline highlighting:
+  - block comments (`/* ... */`) across lines
+  - template literals with `${...}` across lines
 - VSCode-style editing keys (`Ctrl+S`, `Ctrl+Q`, `Ctrl+Z`, `Ctrl+Y`, etc.).
 - Linear selection (`Shift+Arrows`) and block selection (`Option+Arrows`).
 - Clipboard copy/cut/paste (`Ctrl+C`, `Ctrl+K`, `Ctrl+V`) without line numbers.
@@ -24,7 +27,8 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
   - manual hover (`Ctrl+T`)
   - go-to-definition (`Ctrl+D`)
   - references panel (`Ctrl+R`)
-  - jump-back (`Ctrl+O`)
+  - cross-file jump for definition/references targets
+  - jump-back (`Ctrl+O`) with file-aware jump stack
 - LSP integration (`didOpen`, incremental/full `didChange`, `didSave`) for:
   - `zls`
   - TypeScript auto mode: `tsgo --lsp -stdio` -> `npx tsgo --lsp -stdio` -> `typescript-language-server --stdio`

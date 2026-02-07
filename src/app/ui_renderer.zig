@@ -23,12 +23,13 @@ pub fn render(
     try renderDiagnosticsBar(self, &out, frame_allocator, terminal_tab_width);
     try out.appendSlice("\x1b[K\r\n");
 
+    var line_state = try self.highlightStateForLine(self.editor.scroll_y, frame_allocator);
     var row: usize = 0;
     while (row < text_rows) : (row += 1) {
         const line_index = self.editor.scroll_y + row;
 
         if (line_index < self.editor.buffer.lineCount()) {
-            try renderLine(self, &out, line_index, frame_allocator, line_gutter_cols, terminal_tab_width);
+            line_state = try renderLine(self, &out, line_index, line_state, frame_allocator, line_gutter_cols, terminal_tab_width);
         } else {
             try out.appendSlice("\x1b[90m~\x1b[0m");
         }
@@ -80,12 +81,15 @@ pub fn renderLine(
     self: anytype,
     out: *std.array_list.Managed(u8),
     line_index: usize,
+    line_state: highlighter.LineState,
     frame_allocator: std.mem.Allocator,
     line_gutter_cols: usize,
     terminal_tab_width: usize,
-) !void {
+) !highlighter.LineState {
     const line = try self.editor.buffer.lineOwned(frame_allocator, line_index);
-    const spans = try highlighter.highlightLine(frame_allocator, self.editor.language, line);
+    const highlighted = try highlighter.highlightLineWithState(frame_allocator, self.editor.language, line, line_state);
+    const spans = highlighted.spans;
+    self.cacheHighlightStateForNextLine(line_index + 1, highlighted.next_state);
     const diagnostics = self.lsp_state.client.diagnostics();
     const has_diagnostic = lineHasDiagnostic(diagnostics.lines, line_index + 1);
 
@@ -129,6 +133,8 @@ pub fn renderLine(
     } else {
         try renderHighlighted(out, clipped, spans);
     }
+
+    return highlighted.next_state;
 }
 
 pub fn renderDiagnosticsBar(
