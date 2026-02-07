@@ -130,7 +130,7 @@ pub fn renderDiagnosticsBar(
     terminal_tab_width: usize,
 ) !void {
     const diagnostics = self.lsp_state.client.diagnostics();
-    const spinner = lspSpinner();
+    const spinner = lspSpinner(self.ui.lsp_spinner_frame);
 
     var line = std.array_list.Managed(u8).init(frame_allocator);
     if (diagnostics.count > 0) {
@@ -141,16 +141,20 @@ pub fn renderDiagnosticsBar(
         }
         try appendSanitizedSingleLine(&line, diagnostics.first_message);
         if (diagnostics.pending_requests > 0) {
-            try line.writer().print(" | LSP:{c}", .{spinner});
+            try line.writer().print(" | LSP:{c} {d}ms", .{ spinner, diagnostics.pending_ms });
         }
         try out.appendSlice("\x1b[48;5;52m\x1b[97m");
     } else {
         if (self.lsp_state.client.enabled and !self.lsp_state.client.session_ready) {
             try line.writer().print(" LSP: starting {c} ", .{spinner});
         } else if (self.lsp_state.client.enabled and diagnostics.pending_requests > 0) {
-            try line.writer().print(" LSP: waiting {c} ", .{spinner});
+            try line.writer().print(" LSP: waiting {c} {d}ms ", .{ spinner, diagnostics.pending_ms });
         } else if (self.lsp_state.client.enabled) {
-            try line.appendSlice(" LSP: no diagnostics ");
+            if (diagnostics.last_latency_ms > 0) {
+                try line.writer().print(" LSP: no diagnostics ({d}ms) ", .{diagnostics.last_latency_ms});
+            } else {
+                try line.appendSlice(" LSP: no diagnostics ");
+            }
         } else {
             try line.appendSlice(" LSP: off ");
         }
@@ -193,7 +197,13 @@ pub fn renderStatusBar(
 
     var right = std.array_list.Managed(u8).init(frame_allocator);
     const diagnostics = self.lsp_state.client.diagnostics();
-    try right.writer().print("Ln {d}, Col {d} | LSP:{s} | Diag:{d} ", .{ pos.line + 1, visual_col + 1, lsp_mark, diagnostics.count });
+    try right.writer().print("Ln {d}, Col {d} | LSP:{s} | RTT:{d}ms | Diag:{d} ", .{
+        pos.line + 1,
+        visual_col + 1,
+        lsp_mark,
+        diagnostics.last_latency_ms,
+        diagnostics.count,
+    });
 
     const total = self.terminal.width;
     const left_len = @min(left.items.len, total);
@@ -394,11 +404,9 @@ fn promptLabel(mode: PromptMode) []const u8 {
     };
 }
 
-fn lspSpinner() u8 {
+fn lspSpinner(frame: usize) u8 {
     const frames = "|/-\\";
-    const tick = @divTrunc(std.time.nanoTimestamp(), 120 * std.time.ns_per_ms);
-    const index: usize = @intCast(@mod(tick, frames.len));
-    return frames[index];
+    return frames[frame % frames.len];
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {

@@ -109,6 +109,7 @@ pub const App = struct {
     pub fn run(self: *App) !void {
         var next_spinner_frame_ns: i128 = 0;
         var last_pending_requests: usize = 0;
+        var last_spinner_active = false;
         while (self.ui.running) {
             var handled_events: usize = 0;
             while (handled_events < max_events_per_tick) {
@@ -142,9 +143,20 @@ pub const App = struct {
                     self.ui.needs_render = true;
                     last_pending_requests = pending_requests;
                 }
-                if (pending_requests > 0) {
+
+                const spinner_active = !self.lsp_state.client.session_ready or pending_requests > 0;
+                if (spinner_active != last_spinner_active) {
+                    self.ui.needs_render = true;
+                    last_spinner_active = spinner_active;
+                    if (!spinner_active) self.ui.lsp_spinner_frame = 0;
+                }
+
+                if (spinner_active) {
                     const now = std.time.nanoTimestamp();
-                    if (next_spinner_frame_ns == 0 or now >= next_spinner_frame_ns) {
+                    if (next_spinner_frame_ns == 0) {
+                        next_spinner_frame_ns = now + 120 * std.time.ns_per_ms;
+                    } else if (now >= next_spinner_frame_ns) {
+                        self.ui.lsp_spinner_frame +%= 1;
                         self.ui.needs_render = true;
                         next_spinner_frame_ns = now + 120 * std.time.ns_per_ms;
                     }
@@ -155,6 +167,11 @@ pub const App = struct {
                 if (last_pending_requests != 0) {
                     self.ui.needs_render = true;
                     last_pending_requests = 0;
+                }
+                if (last_spinner_active) {
+                    self.ui.needs_render = true;
+                    last_spinner_active = false;
+                    self.ui.lsp_spinner_frame = 0;
                 }
                 next_spinner_frame_ns = 0;
             }

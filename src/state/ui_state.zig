@@ -83,6 +83,7 @@ pub const UiState = struct {
     status: std.array_list.Managed(u8),
     running: bool,
     needs_render: bool,
+    lsp_spinner_frame: usize,
     palette: PaletteState,
     prompt: PromptState,
 
@@ -92,6 +93,7 @@ pub const UiState = struct {
             .status = std.array_list.Managed(u8).init(allocator),
             .running = true,
             .needs_render = true,
+            .lsp_spinner_frame = 0,
             .palette = PaletteState.init(allocator),
             .prompt = PromptState.init(allocator),
         };

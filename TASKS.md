@@ -32,12 +32,15 @@ Current focus: LSP latency loader in ms, perf overlay (FPS/frametime), and poll/
 - [x] Improve startup error messages when no TS LSP provider is available.
 
 ## Phase 2 - LSP UX and Runtime Metrics
-- [ ] Add LSP request latency tracking (`ms`) in client state.
-- [ ] Show LSP latency in diagnostics/top bar loader.
+- [x] Add LSP request latency tracking (`ms`) in client state.
+- [x] Show LSP latency in diagnostics/top bar loader.
 - [ ] Add `ui.perf_overlay` config flag (default `false`).
 - [ ] Add FPS and frametime metrics overlay.
 - [ ] Add large-file smoke scenario and documented thresholds.
-- [ ] Tune poll/sleep strategy to reduce busy-poll overhead.
+- [x] Tune poll/sleep strategy to reduce busy-poll overhead.
+
+Phase 2 notes:
+- 2026-02-07: Added pending/request latency display (`waiting <spinner> <ms>`), deterministic spinner frames, and capped payload processing per `poll()` tick to prevent UI stalls on LSP burst traffic.
 
 ## Phase 3 - Core LSP Features
 - [ ] Implement completion requests and popup integration.

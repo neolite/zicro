@@ -4,6 +4,7 @@ const Config = @import("../config.zig").Config;
 
 const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
 const diagnostics_request_timeout_ns: i128 = 1500 * std.time.ns_per_ms;
+const max_payloads_per_poll: usize = 24;
 const tsgo_command = [_][]const u8{ "tsgo", "--lsp", "-stdio" };
 const npx_tsgo_command = [_][]const u8{ "npx", "tsgo", "--lsp", "-stdio" };
 const tsls_command = [_][]const u8{ "typescript-language-server", "--stdio" };
@@ -15,6 +16,8 @@ pub const DiagnosticsSnapshot = struct {
     first_symbol: []const u8,
     lines: []const usize,
     pending_requests: usize,
+    pending_ms: u32,
+    last_latency_ms: u32,
 };
 
 const ChangeMode = enum {
@@ -39,6 +42,8 @@ pub const Client = struct {
     version: i64,
     server_name: []const u8,
     pending_requests: usize,
+    pending_since_ns: i128,
+    last_latency_ms: u32,
     enabled: bool,
     trace_enabled: bool,
     session_ready: bool,
@@ -68,6 +73,8 @@ pub const Client = struct {
             .version = 1,
             .server_name = "off",
             .pending_requests = 0,
+            .pending_since_ns = 0,
+            .last_latency_ms = 0,
             .enabled = false,
             .trace_enabled = std.process.hasEnvVarConstant("ZICRO_LSP_TRACE"),
             .session_ready = false,
@@ -108,6 +115,8 @@ pub const Client = struct {
         self.child = null;
         self.enabled = false;
         self.pending_requests = 0;
+        self.pending_since_ns = 0;
+        self.last_latency_ms = 0;
         self.session_ready = false;
         self.initialize_request_id = null;
         self.diagnostics_request_id = null;
@@ -241,6 +250,7 @@ pub const Client = struct {
 
     pub fn poll(self: *Client) !bool {
         self.maybeExpireDiagnosticRequest();
+        self.reconcilePendingRequests();
         if (!self.enabled) return false;
         const child = self.child orelse return false;
         const stdout = child.stdout orelse return false;
@@ -288,6 +298,8 @@ pub const Client = struct {
             .first_symbol = self.diag_first_symbol.items,
             .lines = self.diag_lines.items,
             .pending_requests = self.pending_requests,
+            .pending_ms = self.pendingDurationMs(),
+            .last_latency_ms = self.last_latency_ms,
         };
     }
 
@@ -446,7 +458,7 @@ pub const Client = struct {
 
         self.next_id += 1;
         try self.sendPayload(payload);
-        self.pending_requests += 1;
+        self.incrementPendingRequests();
         return request_id;
     }
 
@@ -484,8 +496,9 @@ pub const Client = struct {
 
     fn processIncoming(self: *Client) !bool {
         var diagnostics_changed = false;
+        var processed_count: usize = 0;
 
-        while (true) {
+        while (processed_count < max_payloads_per_poll) {
             const header = findHeaderEnd(self.recv_buffer.items) orelse break;
             const header_bytes = self.recv_buffer.items[0..header.end];
             const content_length = parseContentLength(header_bytes) orelse {
@@ -503,6 +516,7 @@ pub const Client = struct {
             }
 
             self.discardConsumed(payload_end);
+            processed_count += 1;
         }
 
         return diagnostics_changed;
@@ -581,7 +595,7 @@ pub const Client = struct {
         if (response_id != init_id) return false;
 
         self.initialize_request_id = null;
-        if (self.pending_requests > 0) self.pending_requests -= 1;
+        self.decrementPendingRequests();
         if (object.get("error")) |error_value| {
             if (error_value != .null) {
                 self.stop();
@@ -681,14 +695,18 @@ pub const Client = struct {
             }
         }
 
-        if (self.pending_requests > 0) self.pending_requests -= 1;
+        self.decrementPendingRequests();
         return true;
     }
 
     fn clearPendingDiagnosticRequest(self: *Client) void {
+        if (self.diagnostics_request_started_ns > 0) {
+            const elapsed = std.time.nanoTimestamp() - self.diagnostics_request_started_ns;
+            self.last_latency_ms = nsToMs(elapsed);
+        }
         self.diagnostics_request_id = null;
         self.diagnostics_request_started_ns = 0;
-        if (self.pending_requests > 0) self.pending_requests -= 1;
+        self.decrementPendingRequests();
     }
 
     fn maybeExpireDiagnosticRequest(self: *Client) void {
@@ -699,6 +717,35 @@ pub const Client = struct {
 
         self.supports_pull_diagnostics = false;
         self.clearPendingDiagnosticRequest();
+    }
+
+    fn incrementPendingRequests(self: *Client) void {
+        if (self.pending_requests == 0) {
+            self.pending_since_ns = std.time.nanoTimestamp();
+        }
+        self.pending_requests += 1;
+    }
+
+    fn decrementPendingRequests(self: *Client) void {
+        if (self.pending_requests == 0) return;
+        self.pending_requests -= 1;
+        if (self.pending_requests == 0) {
+            self.pending_since_ns = 0;
+        }
+    }
+
+    fn pendingDurationMs(self: *const Client) u32 {
+        if (self.pending_requests == 0 or self.pending_since_ns == 0) return 0;
+        const elapsed = std.time.nanoTimestamp() - self.pending_since_ns;
+        return nsToMs(elapsed);
+    }
+
+    fn reconcilePendingRequests(self: *Client) void {
+        if (self.pending_requests == 0) return;
+        if (self.initialize_request_id != null) return;
+        if (self.diagnostics_request_id != null) return;
+        self.pending_requests = 0;
+        self.pending_since_ns = 0;
     }
 
     fn setDiagnosticsFromItems(self: *Client, items: []const std.json.Value) bool {
@@ -955,6 +1002,15 @@ fn parseJsonRpcId(value: std.json.Value) ?JsonRpcId {
         .string => |raw| JsonRpcId{ .string = raw },
         else => null,
     };
+}
+
+fn nsToMs(value_ns: i128) u32 {
+    if (value_ns <= 0) return 0;
+    const value_u128: u128 = @intCast(value_ns);
+    const ms_u128 = value_u128 / std.time.ns_per_ms;
+    const max_u32 = std.math.maxInt(u32);
+    if (ms_u128 > max_u32) return max_u32;
+    return @intCast(ms_u128);
 }
 
 test "parseContentLength handles CRLF and LF headers" {
