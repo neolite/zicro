@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .name = "zicro",
         .root_module = exe_mod,
     });
+    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -37,6 +38,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
+    unit_tests.linkLibC();
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
