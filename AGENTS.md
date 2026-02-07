@@ -6,9 +6,9 @@ Scope: this file applies to the repository root and all subdirectories, except w
 - Roadmap and task status live in `TASKS.md`.
 
 ## Current Focus
-- Phase 2: LSP latency loader (`ms`) and optional performance overlay (`FPS` and frametime).
-- Poll/sleep tuning to reduce busy-poll overhead without adding input lag.
-- Keep compatibility with existing `.zicro.json` keys while adding new schema.
+- Phase 4: syntax highlighting quality upgrades (multiline comments/strings and keyword lookup optimization).
+- Keep Phase 3 LSP UX stable (completion/hover/definition/references and jump-back flow).
+- Preserve compatibility with existing `.zicro.json` keys while extending schema.
 
 ## Work Rules
 - Before implementation, read `TASKS.md` and pick tasks from the current phase first.

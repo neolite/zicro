@@ -2,6 +2,7 @@ const std = @import("std");
 const Buffer = @import("editor/buffer.zig").Buffer;
 const Terminal = @import("ui/terminal.zig").Terminal;
 const KeyEvent = @import("ui/terminal.zig").KeyEvent;
+const LspClient = @import("lsp/client.zig");
 const keymap = @import("keymap/keymap.zig");
 const Command = keymap.Command;
 const Config = @import("config.zig").Config;
@@ -22,8 +23,12 @@ const UiState = ui_state.UiState;
 const PromptMode = ui_state.PromptMode;
 const PaletteAction = ui_state.PaletteAction;
 const palette_entries = ui_state.palette_entries;
+const LspPanelMode = ui_state.LspPanelMode;
 const LspState = lsp_state.LspState;
 const LspChangePosition = lsp_state.LspChangePosition;
+const LspPosition = LspClient.LspPosition;
+const CompletionItem = LspClient.CompletionItem;
+const LocationItem = LspClient.LocationItem;
 
 const c = @cImport({
     @cInclude("regex.h");
@@ -74,7 +79,7 @@ pub const App = struct {
                 .preferred_visual_col = null,
                 .language = highlighter.detectLanguage(file_path_opt),
             },
-            .ui = UiState.init(allocator),
+            .ui = UiState.init(allocator, config.ui_perf_overlay),
             .lsp_state = LspState.init(
                 allocator,
                 @as(i128, @intCast(config.lsp_change_debounce_ms)) * std.time.ns_per_ms,
@@ -83,7 +88,7 @@ pub const App = struct {
 
         app.lsp_state.client.setDidSavePulseDebounceMs(config.lsp_did_save_debounce_ms);
 
-        try app.setStatus("Ctrl+S save | Ctrl+Q quit | Ctrl+P palette | Ctrl+Z/Ctrl+Y undo/redo");
+        try app.setStatus("Ctrl+S save | Ctrl+Q quit | Ctrl+P palette | Ctrl+N completion | Ctrl+T hover | Ctrl+D definition");
 
         if (config.enable_lsp and app.editor.file_path != null) {
             app.lsp_state.client.startForFile(app.editor.file_path.?, config) catch |err| switch (err) {
@@ -137,6 +142,12 @@ pub const App = struct {
                 if (diagnostics_changed) {
                     self.ui.needs_render = true;
                 }
+                if (try self.processLspInteractionUpdates()) {
+                    self.ui.needs_render = true;
+                }
+                if (try self.processAutoLspRequests()) {
+                    self.ui.needs_render = true;
+                }
 
                 const pending_requests = self.lsp_state.client.diagnostics().pending_requests;
                 if (pending_requests != last_pending_requests) {
@@ -173,6 +184,10 @@ pub const App = struct {
                     last_spinner_active = false;
                     self.ui.lsp_spinner_frame = 0;
                 }
+                if (self.ui.lsp_completion_pending or self.ui.lsp_hover_pending or self.ui.lsp_definition_pending or self.ui.lsp_references_pending or self.ui.lsp_panel_mode != .none) {
+                    self.resetLspUiState();
+                    self.ui.needs_render = true;
+                }
                 next_spinner_frame_ns = 0;
             }
 
@@ -182,6 +197,7 @@ pub const App = struct {
 
             if (self.ui.needs_render) {
                 try self.render();
+                self.markFrameRendered();
                 self.ui.needs_render = false;
             }
 
@@ -201,7 +217,71 @@ pub const App = struct {
         }
     }
 
+    fn markFrameRendered(self: *App) void {
+        if (!self.ui.perf_overlay_enabled) return;
+
+        const now = std.time.nanoTimestamp();
+        if (self.ui.perf_last_frame_ns != 0 and now > self.ui.perf_last_frame_ns) {
+            const delta_ns = now - self.ui.perf_last_frame_ns;
+            const frame_tenths = nsToTenthsMs(delta_ns);
+            self.ui.perf_ft_last_tenths_ms = frame_tenths;
+
+            const write_at = self.ui.perf_sample_index;
+            self.ui.perf_frame_samples[write_at] = frame_tenths;
+            self.ui.perf_sample_index = (write_at + 1) % UiState.perf_sample_capacity;
+            if (self.ui.perf_sample_count < UiState.perf_sample_capacity) {
+                self.ui.perf_sample_count += 1;
+            }
+
+            self.refreshPerfStats();
+        }
+        self.ui.perf_last_frame_ns = now;
+    }
+
+    fn refreshPerfStats(self: *App) void {
+        const sample_count = self.ui.perf_sample_count;
+        if (sample_count == 0) return;
+
+        var sorted: [UiState.perf_sample_capacity]u16 = undefined;
+        var total_tenths: u64 = 0;
+        var max_tenths: u16 = 0;
+
+        var i: usize = 0;
+        while (i < sample_count) : (i += 1) {
+            const value = self.ui.perf_frame_samples[i];
+            sorted[i] = value;
+            total_tenths += value;
+            if (value > max_tenths) max_tenths = value;
+        }
+
+        std.mem.sort(u16, sorted[0..sample_count], {}, comptime std.sort.asc(u16));
+
+        const avg_tenths_u64 = if (sample_count > 0) total_tenths / sample_count else 0;
+        self.ui.perf_ft_avg_tenths_ms = clampU16(avg_tenths_u64);
+        self.ui.perf_ft_max_tenths_ms = max_tenths;
+        const p95_index = if (sample_count > 1) ((sample_count - 1) * 95) / 100 else 0;
+        self.ui.perf_ft_p95_tenths_ms = sorted[p95_index];
+
+        const avg_fps_u64 = if (avg_tenths_u64 > 0)
+            @as(u64, @intCast((10000 + avg_tenths_u64 / 2) / avg_tenths_u64))
+        else
+            0;
+        self.ui.perf_fps_avg = clampU16(avg_fps_u64);
+
+        const inst = fpsTenthsFromFrameTenths(self.ui.perf_ft_last_tenths_ms);
+        if (self.ui.perf_fps_ema_tenths == 0) {
+            self.ui.perf_fps_ema_tenths = inst;
+        } else {
+            const ema = @as(u32, self.ui.perf_fps_ema_tenths);
+            const inst_u32 = @as(u32, inst);
+            const blended: u32 = ((ema * 8) + (inst_u32 * 2) + 5) / 10;
+            self.ui.perf_fps_ema_tenths = clampU16(blended);
+        }
+    }
+
     fn handleEditorInput(self: *App, event: KeyEvent) !void {
+        if (try self.handleLspPanelInput(event)) return;
+
         if (keymap.mapEditor(event)) |cmd| {
             try self.executeCommand(cmd);
             return;
@@ -239,7 +319,538 @@ pub const App = struct {
         }
     }
 
+    fn handleLspPanelInput(self: *App, event: KeyEvent) !bool {
+        if (self.ui.lsp_panel_mode == .none) return false;
+
+        switch (event) {
+            .escape => {
+                self.closeLspPanel();
+                return true;
+            },
+            .up => {
+                if (self.ui.lsp_panel_selected > 0) self.ui.lsp_panel_selected -= 1;
+                return true;
+            },
+            .down => {
+                self.ui.lsp_panel_selected += 1;
+                return true;
+            },
+            .enter => {
+                try self.activateLspPanelSelection();
+                return true;
+            },
+            .tab => {
+                if (self.ui.lsp_panel_mode == .completion) {
+                    try self.activateLspPanelSelection();
+                    return true;
+                }
+                return false;
+            },
+            .char, .text, .backspace, .delete => {
+                self.closeLspPanel();
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn activateLspPanelSelection(self: *App) !void {
+        switch (self.ui.lsp_panel_mode) {
+            .none => {},
+            .completion => {
+                const completion = self.lsp_state.client.completion();
+                if (completion.items.len == 0) {
+                    if (completion.pending) {
+                        try self.setStatus("Completion: waiting for LSP");
+                    } else {
+                        try self.setStatus("Completion: no items");
+                    }
+                    self.closeLspPanel();
+                    return;
+                }
+
+                const index = @min(self.ui.lsp_panel_selected, completion.items.len - 1);
+                try self.applyCompletionItem(completion.items[index]);
+                self.closeLspPanel();
+            },
+            .references => {
+                const references = self.lsp_state.client.references();
+                if (references.items.len == 0) {
+                    try self.setStatus("References: no items");
+                    self.closeLspPanel();
+                    return;
+                }
+
+                const index = @min(self.ui.lsp_panel_selected, references.items.len - 1);
+                try self.jumpToLocation(references.items[index], true);
+                self.closeLspPanel();
+            },
+        }
+    }
+
+    fn closeLspPanel(self: *App) void {
+        self.ui.lsp_panel_mode = .none;
+        self.ui.lsp_panel_selected = 0;
+    }
+
+    fn processLspInteractionUpdates(self: *App) !bool {
+        var changed = false;
+
+        const completion = self.lsp_state.client.completion();
+        if (completion.rev != self.ui.lsp_completion_rev_seen) {
+            self.ui.lsp_completion_rev_seen = completion.rev;
+            changed = true;
+        }
+        if (self.ui.lsp_completion_pending and !completion.pending) {
+            const requested_at_cursor = self.ui.lsp_completion_request_cursor;
+            const is_auto = self.ui.lsp_completion_request_auto;
+            self.ui.lsp_completion_pending = false;
+            self.ui.lsp_completion_request_auto = false;
+            if (completion.items.len == 0) {
+                self.closeLspPanel();
+                if (!is_auto) {
+                    try self.setStatus("Completion: no items");
+                }
+            } else if (self.editor.cursor != requested_at_cursor and is_auto) {
+                self.closeLspPanel();
+            } else {
+                self.ui.lsp_panel_mode = .completion;
+                self.ui.lsp_panel_selected = 0;
+                if (!is_auto) {
+                    try self.setStatus("Completion ready");
+                }
+            }
+            changed = true;
+        }
+
+        const hover = self.lsp_state.client.hover();
+        if (hover.rev != self.ui.lsp_hover_rev_seen) {
+            self.ui.lsp_hover_rev_seen = hover.rev;
+            changed = true;
+        }
+        if (self.ui.lsp_hover_pending and !hover.pending) {
+            const requested_at_cursor = self.ui.lsp_hover_request_cursor;
+            const is_auto = self.ui.lsp_hover_request_auto;
+            self.ui.lsp_hover_pending = false;
+            self.ui.lsp_hover_request_auto = false;
+            if (hover.text.len > 0) {
+                if (self.editor.cursor != requested_at_cursor and is_auto) {
+                    self.clearHoverTooltip();
+                } else if (self.config.lsp_hover_show_mode == .tooltip) {
+                    try self.setHoverTooltipFromRaw(hover.text);
+                } else {
+                    self.clearHoverTooltip();
+                    try self.setStatusFromPrefix("Hover: ", hover.text);
+                }
+            } else {
+                self.clearHoverTooltip();
+                if (!is_auto) {
+                    try self.setStatus("Hover: no info");
+                }
+            }
+            changed = true;
+        }
+
+        const definitions = self.lsp_state.client.definitions();
+        if (definitions.rev != self.ui.lsp_definition_rev_seen) {
+            self.ui.lsp_definition_rev_seen = definitions.rev;
+            changed = true;
+        }
+        if (self.ui.lsp_definition_pending and !definitions.pending) {
+            self.ui.lsp_definition_pending = false;
+            if (definitions.items.len > 0) {
+                try self.jumpToLocation(definitions.items[0], true);
+            } else {
+                try self.setStatus("Definition: not found");
+            }
+            changed = true;
+        }
+
+        const references = self.lsp_state.client.references();
+        if (references.rev != self.ui.lsp_references_rev_seen) {
+            self.ui.lsp_references_rev_seen = references.rev;
+            changed = true;
+        }
+        if (self.ui.lsp_references_pending and !references.pending) {
+            self.ui.lsp_references_pending = false;
+            if (references.items.len > 0) {
+                self.ui.lsp_panel_mode = .references;
+                self.ui.lsp_panel_selected = 0;
+                try self.setStatus("References ready");
+            } else {
+                self.closeLspPanel();
+                try self.setStatus("References: not found");
+            }
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    fn processAutoLspRequests(self: *App) !bool {
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) return false;
+        if (self.ui.prompt.active or self.ui.palette.active) return false;
+
+        var changed = false;
+        const now = std.time.nanoTimestamp();
+
+        if (self.ui.lsp_auto_completion_due_ns > 0 and now >= self.ui.lsp_auto_completion_due_ns) {
+            if (self.lsp_state.pending_lsp_sync) {
+                self.ui.lsp_auto_completion_due_ns = now + 8 * std.time.ns_per_ms;
+            } else {
+                self.ui.lsp_auto_completion_due_ns = 0;
+                if (!self.ui.lsp_completion_pending and self.shouldTriggerAutoCompletion()) {
+                    try self.requestCompletion(true);
+                    changed = true;
+                }
+            }
+        }
+
+        if (self.ui.lsp_auto_hover_due_ns > 0 and now >= self.ui.lsp_auto_hover_due_ns) {
+            if (self.lsp_state.pending_lsp_sync) {
+                self.ui.lsp_auto_hover_due_ns = now + 8 * std.time.ns_per_ms;
+            } else {
+                self.ui.lsp_auto_hover_due_ns = 0;
+                if (self.config.lsp_hover_auto and !self.ui.lsp_hover_pending and self.ui.lsp_panel_mode != .completion) {
+                    try self.requestHover(true);
+                    changed = true;
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    fn requestCompletion(self: *App, auto_mode: bool) !void {
+        const caps = self.lsp_state.client.capabilities();
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) {
+            if (!auto_mode) {
+                try self.setStatus("Completion unavailable: LSP not ready");
+            }
+            return;
+        }
+        if (!caps.completion) {
+            if (!auto_mode) {
+                try self.setStatus("Completion unavailable: server capability missing");
+            }
+            return;
+        }
+        if (self.ui.lsp_completion_pending) {
+            if (!auto_mode) {
+                try self.setStatus("Completion: waiting for previous request");
+            }
+            return;
+        }
+
+        self.clearHoverTooltip();
+        const pos = self.lspPositionFromOffset(self.editor.cursor);
+        self.lsp_state.client.requestCompletion(.{
+            .line = pos.line,
+            .character = pos.character,
+        }) catch |err| {
+            try self.handleLspError(err);
+            return;
+        };
+        self.ui.lsp_completion_pending = true;
+        self.ui.lsp_completion_request_auto = auto_mode;
+        self.ui.lsp_completion_request_cursor = self.editor.cursor;
+        if (!auto_mode) {
+            self.ui.lsp_panel_mode = .completion;
+            self.ui.lsp_panel_selected = 0;
+            try self.setStatus("Completion: requesting");
+        }
+    }
+
+    fn requestHover(self: *App, auto_mode: bool) !void {
+        const caps = self.lsp_state.client.capabilities();
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) {
+            if (!auto_mode) {
+                try self.setStatus("Hover unavailable: LSP not ready");
+            }
+            return;
+        }
+        if (!caps.hover) {
+            if (!auto_mode) {
+                try self.setStatus("Hover unavailable: server capability missing");
+            }
+            return;
+        }
+        if (self.ui.lsp_hover_pending) {
+            if (!auto_mode) {
+                try self.setStatus("Hover: waiting for previous request");
+            }
+            return;
+        }
+
+        const pos = self.lspPositionFromOffset(self.editor.cursor);
+        self.lsp_state.client.requestHover(.{
+            .line = pos.line,
+            .character = pos.character,
+        }) catch |err| {
+            try self.handleLspError(err);
+            return;
+        };
+        self.ui.lsp_hover_pending = true;
+        self.ui.lsp_hover_request_auto = auto_mode;
+        self.ui.lsp_hover_request_cursor = self.editor.cursor;
+        if (!auto_mode) {
+            try self.setStatus("Hover: requesting");
+        }
+    }
+
+    fn scheduleAutoRequestsAfterEdit(self: *App) void {
+        if (!self.lsp_state.client.enabled) return;
+
+        const now = std.time.nanoTimestamp();
+
+        if (self.config.lsp_hover_hide_on_type) {
+            self.clearHoverTooltip();
+        }
+
+        if (self.config.lsp_completion_auto and self.shouldTriggerAutoCompletion()) {
+            self.ui.lsp_auto_completion_due_ns = now + @as(i128, @intCast(self.config.lsp_completion_debounce_ms)) * std.time.ns_per_ms;
+        } else {
+            self.ui.lsp_auto_completion_due_ns = 0;
+            if (self.ui.lsp_panel_mode == .completion) {
+                self.closeLspPanel();
+            }
+        }
+
+        if (self.config.lsp_hover_auto) {
+            self.ui.lsp_auto_hover_due_ns = now + @as(i128, @intCast(self.config.lsp_hover_debounce_ms)) * std.time.ns_per_ms;
+        } else {
+            self.ui.lsp_auto_hover_due_ns = 0;
+        }
+    }
+
+    fn shouldTriggerAutoCompletion(self: *App) bool {
+        if (!self.config.lsp_completion_auto) return false;
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) return false;
+        if (self.editor.selection_anchor != null) return false;
+        if (self.editor.cursor == 0) return false;
+        if (self.ui.prompt.active or self.ui.palette.active) return false;
+
+        const prev = self.editor.buffer.prevCodepointStart(self.editor.cursor);
+        if (prev >= self.editor.cursor) return false;
+        if (self.editor.cursor - prev != 1) return false;
+        const ch = self.editor.buffer.byteAt(prev) orelse return false;
+
+        if (ch == '.' and self.config.lsp_completion_trigger_on_dot) return true;
+        if (!self.config.lsp_completion_trigger_on_letters) return false;
+        if (!isIdentifierByte(ch)) return false;
+
+        return self.completionIdentifierPrefixLen() >= self.config.lsp_completion_min_prefix_len;
+    }
+
+    fn completionIdentifierPrefixLen(self: *const App) u8 {
+        const range = self.identifierPrefixRangeForCursor() orelse return 0;
+        const len = range.end - range.start;
+        return if (len > 255) 255 else @as(u8, @intCast(len));
+    }
+
+    fn identifierPrefixRangeForCursor(self: *const App) ?ByteRange {
+        if (self.editor.cursor == 0) return null;
+
+        var start = self.editor.cursor;
+        while (start > 0) {
+            const prev = self.editor.buffer.prevCodepointStart(start);
+            if (prev >= start) break;
+            if (start - prev != 1) break;
+            const ch = self.editor.buffer.byteAt(prev) orelse break;
+            if (!isIdentifierByte(ch)) break;
+            start = prev;
+        }
+
+        if (start == self.editor.cursor) return null;
+        return .{
+            .start = start,
+            .end = self.editor.cursor,
+        };
+    }
+
+    fn bufferRangeOwned(self: *const App, range: ByteRange) ![]u8 {
+        if (range.end <= range.start) return self.allocator.alloc(u8, 0);
+
+        const len = range.end - range.start;
+        var out = try self.allocator.alloc(u8, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            out[i] = self.editor.buffer.byteAt(range.start + i) orelse 0;
+        }
+        return out;
+    }
+
+    fn clearHoverTooltip(self: *App) void {
+        self.ui.lsp_hover_tooltip_active = false;
+        self.ui.lsp_hover_tooltip_text.clearRetainingCapacity();
+    }
+
+    fn setHoverTooltipFromRaw(self: *App, raw_text: []const u8) !void {
+        self.ui.lsp_hover_tooltip_text.clearRetainingCapacity();
+        var index: usize = 0;
+        while (index < raw_text.len and self.ui.lsp_hover_tooltip_text.items.len < 2048) {
+            const ch = raw_text[index];
+            if (ch == '\r') {
+                index += 1;
+                continue;
+            }
+            if (ch == '\n') {
+                try self.ui.lsp_hover_tooltip_text.append('\n');
+                index += 1;
+                continue;
+            }
+            if (ch == '\t') {
+                try self.ui.lsp_hover_tooltip_text.append(' ');
+                index += 1;
+                continue;
+            }
+            if (ch < 0x20 or ch == 0x7f) {
+                index += 1;
+                continue;
+            }
+            const step = layout.utf8Step(raw_text, index);
+            try self.ui.lsp_hover_tooltip_text.appendSlice(raw_text[index .. index + step]);
+            index += step;
+        }
+        self.ui.lsp_hover_tooltip_active = self.ui.lsp_hover_tooltip_text.items.len > 0;
+    }
+
+    fn requestDefinition(self: *App) !void {
+        const caps = self.lsp_state.client.capabilities();
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) {
+            try self.setStatus("Definition unavailable: LSP not ready");
+            return;
+        }
+        if (!caps.definition) {
+            try self.setStatus("Definition unavailable: server capability missing");
+            return;
+        }
+
+        const pos = self.lspPositionFromOffset(self.editor.cursor);
+        self.lsp_state.client.requestDefinition(.{
+            .line = pos.line,
+            .character = pos.character,
+        }) catch |err| {
+            try self.handleLspError(err);
+            return;
+        };
+        self.ui.lsp_definition_pending = true;
+        try self.setStatus("Definition: requesting");
+    }
+
+    fn requestReferences(self: *App) !void {
+        const caps = self.lsp_state.client.capabilities();
+        if (!self.lsp_state.client.enabled or !self.lsp_state.client.session_ready) {
+            try self.setStatus("References unavailable: LSP not ready");
+            return;
+        }
+        if (!caps.references) {
+            try self.setStatus("References unavailable: server capability missing");
+            return;
+        }
+
+        const pos = self.lspPositionFromOffset(self.editor.cursor);
+        self.lsp_state.client.requestReferences(.{
+            .line = pos.line,
+            .character = pos.character,
+        }) catch |err| {
+            try self.handleLspError(err);
+            return;
+        };
+        self.ui.lsp_references_pending = true;
+        self.ui.lsp_panel_mode = .references;
+        self.ui.lsp_panel_selected = 0;
+        try self.setStatus("References: requesting");
+    }
+
+    fn jumpBack(self: *App) !void {
+        if (self.ui.jump_stack.items.len == 0) {
+            try self.setStatus("Jump back: stack empty");
+            return;
+        }
+
+        const target = self.ui.jump_stack.pop().?;
+        self.editor.cursor = @min(target, self.editor.buffer.len());
+        self.clearSelection();
+        self.centerCursorInViewport();
+        self.editor.preferred_visual_col = null;
+        try self.setStatus("Jumped back");
+    }
+
+    fn applyCompletionItem(self: *App, item: CompletionItem) !void {
+        _ = try self.deleteSelectionIfAny();
+
+        if (item.has_text_edit) {
+            const start = self.offsetFromLspPosition(item.text_edit_start.line, item.text_edit_start.character);
+            const end_raw = self.offsetFromLspPosition(item.text_edit_end.line, item.text_edit_end.character);
+            const end = @max(start, end_raw);
+            try self.queueIncrementalChange(start, end, item.insert_text);
+            if (end > start) {
+                try self.editor.buffer.delete(start, end - start);
+            }
+            try self.editor.buffer.insert(start, item.insert_text);
+            self.editor.cursor = start + item.insert_text.len;
+            self.markBufferEdited();
+            return;
+        }
+
+        if (self.identifierPrefixRangeForCursor()) |prefix_range| {
+            const prefix = try self.bufferRangeOwned(prefix_range);
+            defer self.allocator.free(prefix);
+
+            if (completionSuffix(item.insert_text, prefix)) |suffix| {
+                if (suffix.len == 0) return;
+                try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, suffix);
+                try self.editor.buffer.insert(self.editor.cursor, suffix);
+                self.editor.cursor += suffix.len;
+                self.markBufferEdited();
+                return;
+            }
+        }
+
+        try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, item.insert_text);
+        try self.editor.buffer.insert(self.editor.cursor, item.insert_text);
+        self.editor.cursor += item.insert_text.len;
+        self.markBufferEdited();
+    }
+
+    fn jumpToLocation(self: *App, location: LocationItem, push_current: bool) !void {
+        if (!location.same_document) {
+            try self.setStatus("Cross-file jump not supported yet");
+            return;
+        }
+
+        if (push_current) {
+            try self.pushJumpLocation(self.editor.cursor);
+        }
+
+        const offset = self.offsetFromLspPosition(location.line, location.character);
+        self.editor.cursor = @min(offset, self.editor.buffer.len());
+        self.clearSelection();
+        self.centerCursorInViewport();
+        self.editor.preferred_visual_col = null;
+        try self.setStatus("Jumped");
+    }
+
+    fn pushJumpLocation(self: *App, offset: usize) !void {
+        const max_jump_stack: usize = 256;
+        const clamped = @min(offset, self.editor.buffer.len());
+        if (self.ui.jump_stack.items.len > 0) {
+            const last = self.ui.jump_stack.items[self.ui.jump_stack.items.len - 1];
+            if (last == clamped) return;
+        }
+        if (self.ui.jump_stack.items.len >= max_jump_stack) {
+            _ = self.ui.jump_stack.orderedRemove(0);
+        }
+        try self.ui.jump_stack.append(clamped);
+    }
+
     fn executeCommand(self: *App, command: Command) !void {
+        switch (command) {
+            .lsp_hover, .lsp_completion, .lsp_definition, .lsp_references, .lsp_jump_back => {},
+            else => self.clearHoverTooltip(),
+        }
+
         switch (command) {
             .save => try self.saveFile(),
             .quit => try self.requestQuit(),
@@ -247,15 +858,18 @@ pub const App = struct {
             .cut => try self.cutSelectionToClipboard(),
             .paste => try self.pasteFromClipboard(),
             .goto_line => {
+                self.closeLspPanel();
                 self.ui.prompt.open(.goto_line);
                 self.ui.palette.active = false;
             },
             .regex_search => {
+                self.closeLspPanel();
                 self.ui.prompt.open(.regex_search);
                 self.ui.palette.active = false;
             },
             .toggle_comment => try self.toggleCommentSelection(),
             .show_palette => {
+                self.closeLspPanel();
                 self.ui.palette.active = true;
                 self.ui.palette.clear();
                 self.ui.prompt.close();
@@ -441,6 +1055,11 @@ pub const App = struct {
                 self.clearSelection();
                 self.markBufferEditedForceFullSync();
             },
+            .lsp_completion => try self.requestCompletion(false),
+            .lsp_hover => try self.requestHover(false),
+            .lsp_definition => try self.requestDefinition(),
+            .lsp_references => try self.requestReferences(),
+            .lsp_jump_back => try self.jumpBack(),
         }
     }
 
@@ -941,6 +1560,11 @@ pub const App = struct {
                     try self.setStatus("LSP restart skipped: no file path");
                 }
             },
+            .lsp_completion => try self.requestCompletion(false),
+            .lsp_hover => try self.requestHover(false),
+            .lsp_definition => try self.requestDefinition(),
+            .lsp_references => try self.requestReferences(),
+            .lsp_jump_back => try self.jumpBack(),
         }
     }
 
@@ -973,11 +1597,18 @@ pub const App = struct {
         self.editor.dirty = true;
         self.editor.confirm_quit = false;
         self.editor.search_match = null;
+        if (self.config.lsp_hover_hide_on_type) {
+            self.clearHoverTooltip();
+        }
+        if (self.ui.lsp_panel_mode == .completion) {
+            self.closeLspPanel();
+        }
         if (self.lsp_state.client.enabled) {
             self.lsp_state.client.clearDiagnostics();
         }
         self.editor.preferred_visual_col = null;
         self.queueDidChange();
+        self.scheduleAutoRequestsAfterEdit();
     }
 
     fn markBufferEditedForceFullSync(self: *App) void {
@@ -1114,6 +1745,10 @@ pub const App = struct {
         return app_lsp_sync.utf16ColumnForOffset(self, line, offset);
     }
 
+    fn offsetFromLspPosition(self: *const App, line: usize, character: usize) usize {
+        return app_lsp_sync.offsetFromLspPosition(self, line, character);
+    }
+
     fn clearPendingLspChanges(self: *App) void {
         app_lsp_sync.clearPendingLspChanges(self);
     }
@@ -1128,6 +1763,7 @@ pub const App = struct {
 
     fn handleLspError(self: *App, err: anyerror) !void {
         try app_lsp_sync.handleLspError(self, err);
+        self.resetLspUiState();
     }
 
     fn writeBufferToFile(self: *App, path: []const u8) !void {
@@ -1160,6 +1796,44 @@ pub const App = struct {
         self.ui.status.clearRetainingCapacity();
         try self.ui.status.appendSlice(message);
         self.ui.needs_render = true;
+    }
+
+    fn setStatusFromPrefix(self: *App, prefix: []const u8, raw_text: []const u8) !void {
+        var status = std.array_list.Managed(u8).init(self.allocator);
+        defer status.deinit();
+
+        try status.appendSlice(prefix);
+        var index: usize = 0;
+        while (index < raw_text.len and status.items.len < 300) {
+            const ch = raw_text[index];
+            if (ch == '\n' or ch == '\r' or ch == '\t') {
+                try status.append(' ');
+                index += 1;
+                continue;
+            }
+            if (ch < 0x20 or ch == 0x7f) {
+                index += 1;
+                continue;
+            }
+            const step = layout.utf8Step(raw_text, index);
+            try status.appendSlice(raw_text[index .. index + step]);
+            index += step;
+        }
+
+        try self.setStatus(status.items);
+    }
+
+    fn resetLspUiState(self: *App) void {
+        self.closeLspPanel();
+        self.ui.lsp_completion_pending = false;
+        self.ui.lsp_hover_pending = false;
+        self.ui.lsp_definition_pending = false;
+        self.ui.lsp_references_pending = false;
+        self.ui.lsp_auto_completion_due_ns = 0;
+        self.ui.lsp_auto_hover_due_ns = 0;
+        self.ui.lsp_completion_request_auto = false;
+        self.ui.lsp_hover_request_auto = false;
+        self.clearHoverTooltip();
     }
 
     fn render(self: *App) !void {
@@ -1236,6 +1910,16 @@ fn lineCommentInfo(line: []const u8) LineCommentInfo {
     };
 }
 
+fn isIdentifierByte(ch: u8) bool {
+    return std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch) or ch == '_';
+}
+
+fn completionSuffix(insert_text: []const u8, typed_prefix: []const u8) ?[]const u8 {
+    if (typed_prefix.len == 0) return null;
+    if (!std.mem.startsWith(u8, insert_text, typed_prefix)) return null;
+    return insert_text[typed_prefix.len..];
+}
+
 fn regexMatchInLine(regex: *c.regex_t, line: []const u8, min_col: usize, allocator: std.mem.Allocator) !?ByteRange {
     if (min_col > line.len) return null;
     const sub = line[min_col..];
@@ -1281,4 +1965,38 @@ fn displayWidth(bytes: []const u8, tab_width_input: usize) usize {
 
 fn byteLimitForDisplayWidth(bytes: []const u8, max_width: usize, tab_width_input: usize) usize {
     return layout.byteLimitForDisplayWidth(bytes, max_width, tab_width_input);
+}
+
+fn clampU16(value: u64) u16 {
+    const max_u16 = std.math.maxInt(u16);
+    if (value > max_u16) return max_u16;
+    return @intCast(value);
+}
+
+fn nsToTenthsMs(value_ns: i128) u16 {
+    if (value_ns <= 0) return 0;
+    const ns_u128: u128 = @intCast(value_ns);
+    const tenths_u128 = ns_u128 / (std.time.ns_per_ms / 10);
+    const capped = if (tenths_u128 > std.math.maxInt(u64)) std.math.maxInt(u64) else @as(u64, @intCast(tenths_u128));
+    return clampU16(capped);
+}
+
+fn fpsTenthsFromFrameTenths(frame_tenths_ms: u16) u16 {
+    if (frame_tenths_ms == 0) return 0;
+    const numerator: u64 = 100000;
+    const denominator: u64 = frame_tenths_ms;
+    const fps_tenths = (numerator + denominator / 2) / denominator;
+    return clampU16(fps_tenths);
+}
+
+test "frame helpers convert timings predictably" {
+    try std.testing.expectEqual(@as(u16, 599), fpsTenthsFromFrameTenths(167));
+    try std.testing.expectEqual(@as(u16, 301), nsToTenthsMs(30_150_000));
+}
+
+test "completion suffix uses typed prefix" {
+    const suffix = completionSuffix("console", "con").?;
+    try std.testing.expectEqualStrings("sole", suffix);
+    try std.testing.expectEqual(@as(?[]const u8, null), completionSuffix("sole", "con"));
+    try std.testing.expectEqual(@as(?[]const u8, null), completionSuffix("console", ""));
 }

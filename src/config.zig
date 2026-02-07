@@ -6,6 +6,11 @@ pub const TsLspMode = enum {
     tsgo,
 };
 
+pub const HoverShowMode = enum {
+    status,
+    tooltip,
+};
+
 pub const TypescriptLspConfig = struct {
     mode: TsLspMode,
     command: ?[]u8,
@@ -32,9 +37,21 @@ pub const Config = struct {
     allocator: std.mem.Allocator,
     tab_width: u8,
     autosave: bool,
+    ui_perf_overlay: bool,
     enable_lsp: bool,
     lsp_change_debounce_ms: u16,
     lsp_did_save_debounce_ms: u16,
+    lsp_completion_auto: bool,
+    lsp_completion_debounce_ms: u16,
+    lsp_completion_min_prefix_len: u8,
+    lsp_completion_trigger_on_dot: bool,
+    lsp_completion_trigger_on_letters: bool,
+    lsp_hover_auto: bool,
+    lsp_hover_debounce_ms: u16,
+    lsp_hover_show_mode: HoverShowMode,
+    lsp_hover_hide_on_type: bool,
+    lsp_tooltip_max_width: u16,
+    lsp_tooltip_max_rows: u8,
     lsp_typescript: TypescriptLspConfig,
 
     pub fn load(allocator: std.mem.Allocator, config_path_opt: ?[]const u8, file_path_opt: ?[]const u8) !Config {
@@ -42,9 +59,21 @@ pub const Config = struct {
             .allocator = allocator,
             .tab_width = 4,
             .autosave = false,
+            .ui_perf_overlay = false,
             .enable_lsp = true,
             .lsp_change_debounce_ms = 32,
             .lsp_did_save_debounce_ms = 64,
+            .lsp_completion_auto = true,
+            .lsp_completion_debounce_ms = 48,
+            .lsp_completion_min_prefix_len = 1,
+            .lsp_completion_trigger_on_dot = true,
+            .lsp_completion_trigger_on_letters = true,
+            .lsp_hover_auto = true,
+            .lsp_hover_debounce_ms = 140,
+            .lsp_hover_show_mode = .tooltip,
+            .lsp_hover_hide_on_type = true,
+            .lsp_tooltip_max_width = 72,
+            .lsp_tooltip_max_rows = 10,
             .lsp_typescript = TypescriptLspConfig.init(allocator),
         };
         errdefer config.deinit();
@@ -86,16 +115,39 @@ pub const Config = struct {
         const RawLspServers = struct {
             typescript: ?RawTsLsp = null,
         };
+        const RawLspCompletion = struct {
+            auto: ?bool = null,
+            debounce_ms: ?u16 = null,
+            min_prefix_len: ?u8 = null,
+            trigger_on_dot: ?bool = null,
+            trigger_on_letters: ?bool = null,
+        };
+        const RawLspHover = struct {
+            auto: ?bool = null,
+            debounce_ms: ?u16 = null,
+            show_mode: ?[]const u8 = null,
+            hide_on_type: ?bool = null,
+        };
+        const RawLspUi = struct {
+            tooltip_max_width: ?u16 = null,
+            tooltip_max_rows: ?u8 = null,
+        };
         const RawLsp = struct {
             enabled: ?bool = null,
             change_debounce_ms: ?u16 = null,
             did_save_debounce_ms: ?u16 = null,
+            completion: ?RawLspCompletion = null,
+            hover: ?RawLspHover = null,
+            ui: ?RawLspUi = null,
             typescript: ?RawTsLsp = null,
             servers: ?RawLspServers = null,
         };
         const RawConfig = struct {
             tab_width: ?u8 = null,
             autosave: ?bool = null,
+            ui: ?struct {
+                perf_overlay: ?bool = null,
+            } = null,
             lsp: ?RawLsp = null,
         };
 
@@ -112,6 +164,11 @@ pub const Config = struct {
         if (parsed.value.autosave) |value| {
             self.autosave = value;
         }
+        if (parsed.value.ui) |ui| {
+            if (ui.perf_overlay) |value| {
+                self.ui_perf_overlay = value;
+            }
+        }
         if (parsed.value.lsp) |lsp| {
             if (lsp.enabled) |value| {
                 self.enable_lsp = value;
@@ -124,6 +181,57 @@ pub const Config = struct {
             if (lsp.did_save_debounce_ms) |value| {
                 if (value >= 1 and value <= 1000) {
                     self.lsp_did_save_debounce_ms = value;
+                }
+            }
+            if (lsp.completion) |completion| {
+                if (completion.auto) |value| {
+                    self.lsp_completion_auto = value;
+                }
+                if (completion.debounce_ms) |value| {
+                    if (value >= 1 and value <= 1000) {
+                        self.lsp_completion_debounce_ms = value;
+                    }
+                }
+                if (completion.min_prefix_len) |value| {
+                    if (value <= 64) {
+                        self.lsp_completion_min_prefix_len = value;
+                    }
+                }
+                if (completion.trigger_on_dot) |value| {
+                    self.lsp_completion_trigger_on_dot = value;
+                }
+                if (completion.trigger_on_letters) |value| {
+                    self.lsp_completion_trigger_on_letters = value;
+                }
+            }
+            if (lsp.hover) |hover| {
+                if (hover.auto) |value| {
+                    self.lsp_hover_auto = value;
+                }
+                if (hover.debounce_ms) |value| {
+                    if (value >= 1 and value <= 2000) {
+                        self.lsp_hover_debounce_ms = value;
+                    }
+                }
+                if (hover.show_mode) |value| {
+                    if (parseHoverShowMode(value)) |mode| {
+                        self.lsp_hover_show_mode = mode;
+                    }
+                }
+                if (hover.hide_on_type) |value| {
+                    self.lsp_hover_hide_on_type = value;
+                }
+            }
+            if (lsp.ui) |lsp_ui| {
+                if (lsp_ui.tooltip_max_width) |value| {
+                    if (value >= 16 and value <= 240) {
+                        self.lsp_tooltip_max_width = value;
+                    }
+                }
+                if (lsp_ui.tooltip_max_rows) |value| {
+                    if (value >= 1 and value <= 40) {
+                        self.lsp_tooltip_max_rows = value;
+                    }
                 }
             }
 
@@ -164,6 +272,12 @@ fn parseTsLspMode(raw: []const u8) ?TsLspMode {
     if (std.ascii.eqlIgnoreCase(raw, "auto")) return .auto;
     if (std.ascii.eqlIgnoreCase(raw, "tsls")) return .tsls;
     if (std.ascii.eqlIgnoreCase(raw, "tsgo")) return .tsgo;
+    return null;
+}
+
+fn parseHoverShowMode(raw: []const u8) ?HoverShowMode {
+    if (std.ascii.eqlIgnoreCase(raw, "status")) return .status;
+    if (std.ascii.eqlIgnoreCase(raw, "tooltip")) return .tooltip;
     return null;
 }
 
@@ -277,4 +391,64 @@ test "lsp servers.typescript overrides lsp.typescript values" {
     );
 
     try std.testing.expectEqual(TsLspMode.auto, config.lsp_typescript.mode);
+}
+
+test "parses ui perf overlay flag" {
+    const allocator = std.testing.allocator;
+    var config = try Config.load(allocator, null, null);
+    defer config.deinit();
+
+    try std.testing.expectEqual(false, config.ui_perf_overlay);
+
+    try config.applyJsonBytes(
+        \\{
+        \\  "ui": {
+        \\    "perf_overlay": true
+        \\  }
+        \\}
+    );
+
+    try std.testing.expectEqual(true, config.ui_perf_overlay);
+}
+
+test "parses realtime lsp completion and hover config" {
+    const allocator = std.testing.allocator;
+    var config = try Config.load(allocator, null, null);
+    defer config.deinit();
+
+    try config.applyJsonBytes(
+        \\{
+        \\  "lsp": {
+        \\    "completion": {
+        \\      "auto": false,
+        \\      "debounce_ms": 64,
+        \\      "min_prefix_len": 2,
+        \\      "trigger_on_dot": true,
+        \\      "trigger_on_letters": false
+        \\    },
+        \\    "hover": {
+        \\      "auto": true,
+        \\      "debounce_ms": 180,
+        \\      "show_mode": "status",
+        \\      "hide_on_type": false
+        \\    },
+        \\    "ui": {
+        \\      "tooltip_max_width": 90,
+        \\      "tooltip_max_rows": 12
+        \\    }
+        \\  }
+        \\}
+    );
+
+    try std.testing.expectEqual(false, config.lsp_completion_auto);
+    try std.testing.expectEqual(@as(u16, 64), config.lsp_completion_debounce_ms);
+    try std.testing.expectEqual(@as(u8, 2), config.lsp_completion_min_prefix_len);
+    try std.testing.expectEqual(true, config.lsp_completion_trigger_on_dot);
+    try std.testing.expectEqual(false, config.lsp_completion_trigger_on_letters);
+    try std.testing.expectEqual(true, config.lsp_hover_auto);
+    try std.testing.expectEqual(@as(u16, 180), config.lsp_hover_debounce_ms);
+    try std.testing.expectEqual(HoverShowMode.status, config.lsp_hover_show_mode);
+    try std.testing.expectEqual(false, config.lsp_hover_hide_on_type);
+    try std.testing.expectEqual(@as(u16, 90), config.lsp_tooltip_max_width);
+    try std.testing.expectEqual(@as(u8, 12), config.lsp_tooltip_max_rows);
 }

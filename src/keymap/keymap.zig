@@ -37,6 +37,11 @@ pub const Command = enum {
     insert_newline,
     undo,
     redo,
+    lsp_completion,
+    lsp_hover,
+    lsp_definition,
+    lsp_references,
+    lsp_jump_back,
 };
 
 pub fn mapEditor(event: KeyEvent) ?Command {
@@ -79,6 +84,11 @@ pub fn mapEditor(event: KeyEvent) ?Command {
             '/' => .toggle_comment,
             'z' => .undo,
             'y' => .redo,
+            'n' => .lsp_completion,
+            't' => .lsp_hover,
+            'd' => .lsp_definition,
+            'r' => .lsp_references,
+            'o' => .lsp_jump_back,
             'b' => .move_left,
             'a' => .move_home,
             'e' => .move_end,

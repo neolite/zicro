@@ -37,6 +37,29 @@ pub fn utf16ColumnForOffset(self: anytype, line: usize, offset: usize) usize {
     return utf16_col;
 }
 
+pub fn offsetFromLspPosition(self: anytype, line: usize, character: usize) usize {
+    const line_count = self.editor.buffer.lineCount();
+    if (line >= line_count) return self.editor.buffer.len();
+
+    const line_start = self.editor.buffer.offsetFromLineCol(line, 0);
+    const line_end = self.editor.buffer.offsetFromLineCol(line, std.math.maxInt(usize));
+    var cursor = line_start;
+    var utf16_col: usize = 0;
+
+    while (cursor < line_end) {
+        if (utf16_col >= character) break;
+        const next = self.editor.buffer.nextCodepointEnd(cursor);
+        if (next <= cursor) break;
+        const step = next - cursor;
+        const utf16_step: usize = if (step == 4) 2 else 1;
+        if (utf16_col + utf16_step > character) break;
+        utf16_col += utf16_step;
+        cursor = next;
+    }
+
+    return cursor;
+}
+
 pub fn clearPendingLspChanges(self: anytype) void {
     for (self.lsp_state.pending_lsp_changes.items) |change| {
         self.allocator.free(change.text);

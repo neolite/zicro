@@ -46,6 +46,14 @@ pub fn render(
         try renderPrompt(self, &out);
     }
 
+    if (!self.ui.palette.active and !self.ui.prompt.active and self.ui.lsp_panel_mode != .none) {
+        try renderLspPanel(self, &out, frame_allocator, top_bar_rows, line_gutter_cols, terminal_tab_width);
+    }
+
+    if (!self.ui.palette.active and !self.ui.prompt.active and self.ui.lsp_hover_tooltip_active) {
+        try renderHoverTooltip(self, &out, frame_allocator, top_bar_rows, line_gutter_cols, terminal_tab_width);
+    }
+
     if (self.ui.palette.active) {
         try renderPalette(self, &out, frame_allocator);
         const query_col = displayWidth(self.ui.palette.query.items, terminal_tab_width);
@@ -197,13 +205,31 @@ pub fn renderStatusBar(
 
     var right = std.array_list.Managed(u8).init(frame_allocator);
     const diagnostics = self.lsp_state.client.diagnostics();
-    try right.writer().print("Ln {d}, Col {d} | LSP:{s} | RTT:{d}ms | Diag:{d} ", .{
+    try right.writer().print("Ln {d}, Col {d} | LSP:{s} | RTT:{d}ms | Diag:{d}", .{
         pos.line + 1,
         visual_col + 1,
         lsp_mark,
         diagnostics.last_latency_ms,
         diagnostics.count,
     });
+    if (self.config.ui_perf_overlay) {
+        const ema_whole = self.ui.perf_fps_ema_tenths / 10;
+        const ema_frac = self.ui.perf_fps_ema_tenths % 10;
+        const ft_avg_whole = self.ui.perf_ft_avg_tenths_ms / 10;
+        const ft_avg_frac = self.ui.perf_ft_avg_tenths_ms % 10;
+        const ft_p95_whole = self.ui.perf_ft_p95_tenths_ms / 10;
+        const ft_p95_frac = self.ui.perf_ft_p95_tenths_ms % 10;
+        try right.writer().print(" | FPS:{d}/{d}.{d} | FT:{d}.{d}/{d}.{d}ms", .{
+            self.ui.perf_fps_avg,
+            ema_whole,
+            ema_frac,
+            ft_avg_whole,
+            ft_avg_frac,
+            ft_p95_whole,
+            ft_p95_frac,
+        });
+    }
+    try right.append(' ');
 
     const total = self.terminal.width;
     const left_len = @min(left.items.len, total);
@@ -306,6 +332,170 @@ pub fn renderPalette(self: anytype, out: *std.array_list.Managed(u8), frame_allo
         }
         try out.writer().print("{s}{s}\x1b[0m", .{ prefix, entry.label });
     }
+}
+
+fn renderLspPanel(
+    self: anytype,
+    out: *std.array_list.Managed(u8),
+    frame_allocator: std.mem.Allocator,
+    top_bar_rows: usize,
+    line_gutter_cols: usize,
+    terminal_tab_width: usize,
+) !void {
+    _ = frame_allocator;
+
+    const max_rows: usize = 8;
+    const panel_width_cap: usize = @max(self.terminal.width -| 2, 1);
+    const panel_width: usize = if (panel_width_cap >= 16) @min(panel_width_cap, @as(usize, 72)) else panel_width_cap;
+    const anchor = popupAnchor(self, top_bar_rows, line_gutter_cols, terminal_tab_width, max_rows, panel_width);
+    const start_row = anchor.row;
+    const start_col = anchor.col;
+
+    switch (self.ui.lsp_panel_mode) {
+        .none => return,
+        .completion => {
+            const completion = self.lsp_state.client.completion();
+            try out.writer().print("\x1b[{d};{d}H\x1b[48;5;238m\x1b[97m Completion \x1b[0m", .{ start_row - 1, start_col });
+            if (completion.pending and completion.items.len == 0) {
+                try out.writer().print("\x1b[{d};{d}H\x1b[K\x1b[48;5;240m\x1b[97m loading... \x1b[0m", .{ start_row, start_col });
+                return;
+            }
+            const rows = @min(max_rows, completion.items.len);
+            var row: usize = 0;
+            while (row < rows) : (row += 1) {
+                const selected = row == @min(self.ui.lsp_panel_selected, completion.items.len - 1);
+                try out.writer().print("\x1b[{d};{d}H\x1b[K", .{ start_row + row, start_col });
+                if (selected) try out.appendSlice("\x1b[48;5;240m\x1b[97m");
+                const label = completion.items[row].label;
+                const limit = byteLimitForDisplayWidth(label, panel_width, terminal_tab_width);
+                try out.appendSlice(label[0..limit]);
+                try out.appendSlice("\x1b[0m");
+            }
+        },
+        .references => {
+            const references = self.lsp_state.client.references();
+            try out.writer().print("\x1b[{d};{d}H\x1b[48;5;238m\x1b[97m References \x1b[0m", .{ start_row - 1, start_col });
+            if (references.pending and references.items.len == 0) {
+                try out.writer().print("\x1b[{d};{d}H\x1b[K\x1b[48;5;240m\x1b[97m loading... \x1b[0m", .{ start_row, start_col });
+                return;
+            }
+            const rows = @min(max_rows, references.items.len);
+            var row: usize = 0;
+            while (row < rows) : (row += 1) {
+                const selected = row == @min(self.ui.lsp_panel_selected, references.items.len - 1);
+                try out.writer().print("\x1b[{d};{d}H\x1b[K", .{ start_row + row, start_col });
+                if (selected) try out.appendSlice("\x1b[48;5;240m\x1b[97m");
+                const item = references.items[row];
+                if (item.same_document) {
+                    try out.writer().print("L{d}:{d}", .{ item.line + 1, item.character + 1 });
+                } else {
+                    try out.writer().print("external L{d}:{d}", .{ item.line + 1, item.character + 1 });
+                }
+                try out.appendSlice("\x1b[0m");
+            }
+        },
+    }
+}
+
+fn renderHoverTooltip(
+    self: anytype,
+    out: *std.array_list.Managed(u8),
+    frame_allocator: std.mem.Allocator,
+    top_bar_rows: usize,
+    line_gutter_cols: usize,
+    terminal_tab_width: usize,
+) !void {
+    _ = frame_allocator;
+    if (!self.ui.lsp_hover_tooltip_active) return;
+    if (self.ui.lsp_hover_tooltip_text.items.len == 0) return;
+
+    const max_rows_cfg: usize = @max(@as(usize, self.config.lsp_tooltip_max_rows), 1);
+    const max_rows: usize = @max(@min(max_rows_cfg, self.terminal.height -| 2), 1);
+    const width_cap: usize = @max(self.terminal.width -| 2, 1);
+    const width_cfg: usize = @max(@as(usize, self.config.lsp_tooltip_max_width), 16);
+    const width: usize = if (width_cap >= 16) @min(width_cfg, width_cap) else width_cap;
+    const anchor = popupAnchor(self, top_bar_rows, line_gutter_cols, terminal_tab_width, max_rows, width);
+    const start_row = anchor.row;
+    const start_col = anchor.col;
+
+    try out.writer().print("\x1b[{d};{d}H\x1b[48;5;238m\x1b[97m Hover \x1b[0m", .{ start_row - 1, start_col });
+
+    const text = self.ui.lsp_hover_tooltip_text.items;
+    var text_index: usize = 0;
+    var row: usize = 0;
+    while (row < max_rows and text_index <= text.len) {
+        const next_newline = std.mem.indexOfScalarPos(u8, text, text_index, '\n') orelse text.len;
+        var segment_start = text_index;
+        const segment_end = next_newline;
+
+        if (segment_start == segment_end) {
+            try out.writer().print("\x1b[{d};{d}H\x1b[K\x1b[48;5;240m\x1b[97m", .{ start_row + row, start_col });
+            var pad_blank: usize = 0;
+            while (pad_blank < width) : (pad_blank += 1) try out.append(' ');
+            try out.appendSlice("\x1b[0m");
+            row += 1;
+        } else {
+            while (segment_start < segment_end and row < max_rows) {
+                const segment = text[segment_start..segment_end];
+                var limit = byteLimitForDisplayWidth(segment, width, terminal_tab_width);
+                if (limit == 0 and segment.len > 0) {
+                    limit = layout.utf8Step(segment, 0);
+                }
+                const chunk = segment[0..@min(limit, segment.len)];
+                const used = displayWidth(chunk, terminal_tab_width);
+
+                try out.writer().print("\x1b[{d};{d}H\x1b[K\x1b[48;5;240m\x1b[97m", .{ start_row + row, start_col });
+                try out.appendSlice(chunk);
+                var pad: usize = used;
+                while (pad < width) : (pad += 1) try out.append(' ');
+                try out.appendSlice("\x1b[0m");
+
+                segment_start += chunk.len;
+                row += 1;
+            }
+        }
+
+        if (next_newline >= text.len) break;
+        text_index = next_newline + 1;
+    }
+}
+
+const PopupAnchor = struct {
+    row: usize,
+    col: usize,
+};
+
+fn popupAnchor(
+    self: anytype,
+    top_bar_rows: usize,
+    line_gutter_cols: usize,
+    terminal_tab_width: usize,
+    desired_rows: usize,
+    width: usize,
+) PopupAnchor {
+    const pos = self.editor.buffer.lineColFromOffset(self.editor.cursor);
+    const visible_line = if (pos.line >= self.editor.scroll_y) pos.line - self.editor.scroll_y else 0;
+    const cursor_row = top_bar_rows + visible_line + 1;
+
+    var row = cursor_row + 1;
+    const min_row: usize = 2;
+    const max_row = if (self.terminal.height > desired_rows + 1) self.terminal.height - desired_rows else min_row;
+    if (row > max_row) {
+        row = if (cursor_row > desired_rows + 1) cursor_row - desired_rows else min_row;
+    }
+    if (row < min_row) row = min_row;
+
+    const visual_col = self.editor.buffer.visualColumnFromOffset(self.editor.cursor, terminal_tab_width);
+    var col = visual_col + line_gutter_cols + 2;
+    if (col + width > self.terminal.width) {
+        col = if (self.terminal.width > width + 1) self.terminal.width - width else 1;
+    }
+    if (col < 1) col = 1;
+
+    return .{
+        .row = row,
+        .col = col,
+    };
 }
 
 pub fn paletteMatches(self: anytype, allocator: std.mem.Allocator) !std.array_list.Managed(usize) {

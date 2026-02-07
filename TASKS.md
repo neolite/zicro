@@ -1,14 +1,14 @@
 # Zicro Roadmap
 
 Updated: 2026-02-07
-Current phase: Phase 2
-Current focus: LSP latency loader in ms, perf overlay (FPS/frametime), and poll/sleep tuning
+Current phase: Phase 4
+Current focus: multiline syntax highlighting (block comments/template strings) and tokenizer regressions
 
 ## Phase Gate (Required for every phase)
-- [ ] Run `zig fmt` on changed Zig files.
-- [ ] Run `zig build` on Zig `0.15.2`.
-- [ ] Run `zig build test` on Zig `0.15.2`.
-- [ ] Add short phase completion note with risks/next actions.
+- [x] Run `zig fmt` on changed Zig files.
+- [x] Run `zig build` on Zig `0.15.2`.
+- [x] Run `zig build test` on Zig `0.15.2`.
+- [x] Add short phase completion note with risks/next actions.
 
 ## Documentation and Contract Policy
 - [ ] Add/maintain `//!` module docs for core modules touched in a phase.
@@ -34,21 +34,26 @@ Current focus: LSP latency loader in ms, perf overlay (FPS/frametime), and poll/
 ## Phase 2 - LSP UX and Runtime Metrics
 - [x] Add LSP request latency tracking (`ms`) in client state.
 - [x] Show LSP latency in diagnostics/top bar loader.
-- [ ] Add `ui.perf_overlay` config flag (default `false`).
-- [ ] Add FPS and frametime metrics overlay.
-- [ ] Add large-file smoke scenario and documented thresholds.
+- [x] Add `ui.perf_overlay` config flag (default `false`).
+- [x] Add FPS and frametime metrics overlay.
+- [x] Add large-file smoke scenario and documented thresholds.
 - [x] Tune poll/sleep strategy to reduce busy-poll overhead.
 
 Phase 2 notes:
 - 2026-02-07: Added pending/request latency display (`waiting <spinner> <ms>`), deterministic spinner frames, and capped payload processing per `poll()` tick to prevent UI stalls on LSP burst traffic.
+- 2026-02-07: Added `ui.perf_overlay` config with runtime `FPS/FT` metrics in status bar, and validated Phase 2 gate (`fmt/build/test`) on Zig `0.15.2`.
 
 ## Phase 3 - Core LSP Features
-- [ ] Implement completion requests and popup integration.
-- [ ] Implement hover requests and inline/panel rendering.
-- [ ] Implement go-to-definition navigation flow.
-- [ ] Implement references navigation (or queue behind definition if blocked).
-- [ ] Add keybindings and fallback behavior for unavailable capabilities.
-- [ ] Add protocol tests for request/response parsing and routing.
+- [x] Implement completion requests and popup integration.
+- [x] Implement hover requests and inline/panel rendering.
+- [x] Implement go-to-definition navigation flow.
+- [x] Implement references navigation (or queue behind definition if blocked).
+- [x] Add keybindings and fallback behavior for unavailable capabilities.
+- [x] Add protocol tests for request/response parsing and routing.
+
+Phase 3 notes:
+- 2026-02-07: Added LSP completion popup, hover requests, go-to-definition, references panel navigation, and jump-back stack.
+- 2026-02-07: Added capability-aware fallbacks and protocol parser tests (capabilities, textEdit, location, hover payloads).
 
 ## Phase 4 - Syntax Highlighting Upgrade
 - [ ] Add multiline block comment support (`/* ... */`) for JS/TS.

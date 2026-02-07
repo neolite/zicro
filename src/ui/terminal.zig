@@ -183,6 +183,16 @@ fn mapKey(key: vaxis.Key) ?KeyEvent {
     }
 
     if (!key.mods.ctrl and !key.mods.alt and !key.mods.super and !key.mods.meta) {
+        // Some terminals emit Ctrl+letter as raw ASCII control codes (1..26)
+        // without reporting the Ctrl modifier. Normalize those to .ctrl events.
+        if (key.codepoint >= 1 and key.codepoint <= 26) {
+            const ctrl_char: u8 = @intCast(key.codepoint + ('a' - 1));
+            return KeyEvent{ .ctrl = ctrl_char };
+        }
+        if (key.codepoint == 31) {
+            return KeyEvent{ .ctrl = '/' };
+        }
+
         if (key.text) |text| {
             if (text.len > 0) {
                 return KeyEvent{ .text = text };
