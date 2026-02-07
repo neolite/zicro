@@ -12,6 +12,7 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
 - Clipboard copy/cut/paste (`Ctrl+C`, `Ctrl+K`, `Ctrl+V`) without line numbers.
 - Regex search prompt (`Ctrl+F`) with realtime preview.
 - In search prompt: `Down` = next match, `Up` = previous match.
+- Search match is auto-centered in the viewport for better navigation UX.
 - LSP integration (`didOpen`, incremental/full `didChange`, `didSave`) for:
   - `zls`
   - `typescript-language-server --stdio`
@@ -46,6 +47,10 @@ cd zicro
 - Builds and installs `zicro` into `${PREFIX:-$HOME/.local}/bin`.
 - Works on both macOS and Linux.
 
+`scripts/large-file-smoke.sh`
+- Generates a realistic large file (`100MB+`) for manual smoke/perf tests.
+- Can open it immediately with `--open`.
+
 Examples:
 
 ```bash
@@ -53,6 +58,7 @@ Examples:
 ./scripts/install.sh
 PREFIX=/usr/local ./scripts/install.sh
 ZIG_BIN=/tmp/zig-aarch64-macos-0.15.2/zig ./scripts/build.sh
+./scripts/large-file-smoke.sh 128 /tmp/zicro-large-128mb.ts
 ```
 
 ## Key bindings
@@ -106,3 +112,15 @@ Install servers:
 - Bash: `npm i -g bash-language-server`
 
 For JS/TS, `zicro` checks `./node_modules/.bin` first, then `PATH`.
+
+## Large files
+
+- Editor file-open limit is `512MB`.
+- LSP `didOpen` sync uses a `32MB` cap; for larger files the editor still opens, but LSP is disabled for that file.
+- Recommended large-file smoke flow:
+
+```bash
+./scripts/large-file-smoke.sh 128 /tmp/zicro-large-128mb.ts --open
+```
+
+For raw editing performance checks, disable LSP in `.zicro.json`.

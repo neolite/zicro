@@ -13,6 +13,7 @@ const c = @cImport({
     @cInclude("regex.h");
 });
 
+const max_open_file_bytes: usize = 512 * 1024 * 1024;
 const idle_sleep_ns: u64 = 1 * std.time.ns_per_ms;
 const terminal_tab_width: usize = 8;
 const line_gutter_cols: usize = 5;
@@ -161,7 +162,10 @@ pub const App = struct {
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, file_path_opt: ?[]const u8) !App {
         const file_bytes = if (file_path_opt) |path|
-            std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024) catch try allocator.alloc(u8, 0)
+            std.fs.cwd().readFileAlloc(allocator, path, max_open_file_bytes) catch |err| switch (err) {
+                error.FileNotFound => try allocator.alloc(u8, 0),
+                else => return err,
+            }
         else
             try allocator.alloc(u8, 0);
         defer allocator.free(file_bytes);
@@ -202,8 +206,9 @@ pub const App = struct {
         try app.setStatus("Ctrl+S save | Ctrl+Q quit | Ctrl+P palette | Ctrl+Z/Ctrl+Y undo/redo");
 
         if (config.enable_lsp and app.file_path != null) {
-            app.lsp.startForFile(app.file_path.?) catch {
-                try app.setStatus("LSP disabled: server not found or failed to spawn");
+            app.lsp.startForFile(app.file_path.?) catch |err| switch (err) {
+                error.FileTooBig => try app.setStatus("LSP disabled: file too large for didOpen sync"),
+                else => try app.setStatus("LSP disabled: server not found or failed to spawn"),
             };
         }
 
@@ -730,8 +735,24 @@ pub const App = struct {
     fn applySearchMatch(self: *App, found: SearchMatch) void {
         self.cursor = found.start;
         self.search_match = found;
+        self.centerCursorInViewport();
         self.clearSelection();
         self.preferred_visual_col = null;
+    }
+
+    fn centerCursorInViewport(self: *App) void {
+        const text_rows = self.editorTextRows();
+        const line_count = self.buffer.lineCount();
+        if (line_count <= text_rows) {
+            self.scroll_y = 0;
+            return;
+        }
+
+        const line = self.buffer.lineColFromOffset(self.cursor).line;
+        const half = text_rows / 2;
+        const desired_top = if (line > half) line - half else 0;
+        const max_top = line_count - text_rows;
+        self.scroll_y = @min(desired_top, max_top);
     }
 
     fn findRegexForward(self: *App, pattern: []const u8, start_offset_input: usize) !?SearchMatch {

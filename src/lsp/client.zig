@@ -1,6 +1,8 @@
 const std = @import("std");
 const presets = @import("presets.zig");
 
+const max_lsp_open_file_bytes: usize = 32 * 1024 * 1024;
+
 pub const DiagnosticsSnapshot = struct {
     count: usize,
     first_line: ?usize,
@@ -151,7 +153,7 @@ pub const Client = struct {
         self.document_uri = try toFileUri(self.allocator, abs_file);
         self.root_uri = try toFileUri(self.allocator, root_path);
 
-        const text = try std.fs.cwd().readFileAlloc(self.allocator, file_path, 32 * 1024 * 1024);
+        const text = try std.fs.cwd().readFileAlloc(self.allocator, file_path, max_lsp_open_file_bytes);
         if (self.pending_open_text) |pending| self.allocator.free(pending);
         self.pending_open_text = text;
 

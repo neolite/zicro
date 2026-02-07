@@ -33,6 +33,12 @@ pub fn main() !void {
             );
             std.process.exit(1);
         },
+        error.FileTooBig => {
+            try std.fs.File.stderr().writeAll(
+                "file is too large for current editor limit (512MB).\n",
+            );
+            std.process.exit(1);
+        },
         else => return err,
     };
     defer app.deinit();
