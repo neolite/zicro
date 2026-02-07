@@ -1,0 +1,17 @@
+.{
+    .name = .zicro,
+    .version = "0.1.0",
+    .fingerprint = 0xb9fba53e35a88102,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .vaxis = .{
+            .path = "third_party/libvaxis",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "third_party",
+    },
+}
