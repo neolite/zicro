@@ -19,6 +19,8 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
   - multiline state tracking until exact terminator line
 - VSCode-style editing keys (`Ctrl+S`, `Ctrl+Q`, `Ctrl+Z`, `Ctrl+Y`, etc.).
 - Linear selection (`Shift+Arrows`) and block selection (`Option+Arrows`).
+- Multi-cursor editing (`Ctrl+Shift+J/K` add caret, `Ctrl+Shift+M` clear).
+- VSCode-style `Alt/Option+Click` to add an extra cursor at click position.
 - Clipboard copy/cut/paste (`Ctrl+C`, `Ctrl+K`, `Ctrl+V`) without line numbers.
 - Regex search prompt (`Ctrl+F`) with realtime preview.
 - In search prompt: `Down` = next match, `Up` = previous match.
@@ -122,16 +124,21 @@ git push origin v0.2.0
 - `Ctrl+O`: jump back after LSP jump
 - `Ctrl+W`: toggle info/debug panel
 - `Ctrl+L`: toggle line numbers
+- `Ctrl+Shift+J`: add cursor on line below (same visual column)
+- `Ctrl+Shift+K`: add cursor on line above (same visual column)
+- `Ctrl+Shift+M`: clear all extra cursors
 - `Tab`: accept selected completion item when completion popup is open
 - Arrows/Home/End/PageUp/PageDown: navigation
 - `Shift+Arrows` + `Shift+Home/End/PageUp/PageDown`: linear selection
 - `Option+Arrows`: block selection
+- `Alt/Option+Click`: add extra cursor at clicked position
 - `Ctrl+Left/Right`: word navigation (if terminal sends modifier CSI)
 
 macOS aliases (native-style):
 - `Cmd+P` file finder, `Cmd+Shift+P` command palette
 - `Cmd+F` regex search, `Cmd+Shift+F` project search
 - `Cmd+S` save, `Cmd+Q` quit, `Cmd+C/X/V` copy/cut/paste
+- `Cmd+Shift+J/K/M` multi-cursor add down/up/clear
 
 ## Config
 

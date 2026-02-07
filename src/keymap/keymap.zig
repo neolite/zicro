@@ -1,3 +1,4 @@
+const std = @import("std");
 const KeyEvent = @import("../ui/terminal.zig").KeyEvent;
 
 pub const Command = enum {
@@ -32,6 +33,9 @@ pub const Command = enum {
     block_select_right,
     block_select_up,
     block_select_down,
+    add_cursor_up,
+    add_cursor_down,
+    clear_multi_cursor,
     word_left,
     word_right,
     backspace,
@@ -103,6 +107,9 @@ pub fn mapEditor(event: KeyEvent) ?Command {
         .ctrl_shift => |ch| switch (ch) {
             'p' => .show_command_palette,
             'f' => .project_search,
+            'k' => .add_cursor_up,
+            'j' => .add_cursor_down,
+            'm' => .clear_multi_cursor,
             else => null,
         },
         .cmd => |ch| switch (ch) {
@@ -123,8 +130,23 @@ pub fn mapEditor(event: KeyEvent) ?Command {
         .cmd_shift => |ch| switch (ch) {
             'p' => .show_command_palette,
             'f' => .project_search,
+            'k' => .add_cursor_up,
+            'j' => .add_cursor_down,
+            'm' => .clear_multi_cursor,
             else => null,
         },
         else => null,
     };
+}
+
+test "maps multi-cursor shortcuts on ctrl+shift" {
+    try std.testing.expectEqual(@as(?Command, .add_cursor_up), mapEditor(.{ .ctrl_shift = 'k' }));
+    try std.testing.expectEqual(@as(?Command, .add_cursor_down), mapEditor(.{ .ctrl_shift = 'j' }));
+    try std.testing.expectEqual(@as(?Command, .clear_multi_cursor), mapEditor(.{ .ctrl_shift = 'm' }));
+}
+
+test "maps multi-cursor shortcuts on cmd+shift" {
+    try std.testing.expectEqual(@as(?Command, .add_cursor_up), mapEditor(.{ .cmd_shift = 'k' }));
+    try std.testing.expectEqual(@as(?Command, .add_cursor_down), mapEditor(.{ .cmd_shift = 'j' }));
+    try std.testing.expectEqual(@as(?Command, .clear_multi_cursor), mapEditor(.{ .cmd_shift = 'm' }));
 }

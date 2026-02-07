@@ -120,30 +120,39 @@ pub fn renderLine(
         }
     }
 
-    const Overlay = struct {
-        range: ByteRange,
-        ansi: []const u8,
-    };
-    var overlay: ?Overlay = null;
-    if (selectionRangeOnLine(self, line_index, line.len, terminal_tab_width)) |selection_range| {
-        overlay = .{
-            .range = selection_range,
-            .ansi = "\x1b[7m",
-        };
-    } else if (searchRangeOnLine(self, line_index, line.len)) |search_range| {
-        overlay = .{
-            .range = search_range,
-            .ansi = "\x1b[48;5;24m\x1b[97m",
-        };
-    } else if (diagnosticSymbolRangeOnLine(self, line_index, line)) |symbol_range| {
-        overlay = .{
+    var overlays = std.array_list.Managed(StyledOverlay).init(frame_allocator);
+    const occurrence_ranges = try selectionOccurrencesOnLineOwned(self, frame_allocator, line_index, line);
+    for (occurrence_ranges) |range| {
+        try overlays.append(.{
+            .range = range,
+            .ansi = "\x1b[48;5;238m\x1b[97m",
+            .priority = 1,
+        });
+    }
+    if (diagnosticSymbolRangeOnLine(self, line_index, line)) |symbol_range| {
+        try overlays.append(.{
             .range = symbol_range,
             .ansi = "\x1b[48;5;88m\x1b[97m",
-        };
+            .priority = 2,
+        });
+    }
+    if (searchRangeOnLine(self, line_index, line.len)) |search_range| {
+        try overlays.append(.{
+            .range = search_range,
+            .ansi = "\x1b[48;5;24m\x1b[97m",
+            .priority = 3,
+        });
+    }
+    if (selectionRangeOnLine(self, line_index, line.len, terminal_tab_width)) |selection_range| {
+        try overlays.append(.{
+            .range = selection_range,
+            .ansi = "\x1b[7m",
+            .priority = 4,
+        });
     }
 
-    if (overlay) |active_overlay| {
-        try renderHighlightedWithOverlay(out, clipped, spans, active_overlay.range, active_overlay.ansi);
+    if (overlays.items.len > 0) {
+        try renderHighlightedWithOverlays(out, clipped, spans, overlays.items);
     } else {
         try renderHighlighted(out, clipped, spans);
     }
@@ -232,6 +241,9 @@ pub fn renderStatusBar(
         diagnostics.last_latency_ms,
         diagnostics.count,
     });
+    if (self.extra_cursors.items.len > 0) {
+        try right.writer().print(" | MC:{d}", .{self.extra_cursors.items.len + 1});
+    }
     if (self.ui.file_open_last_ms > 0) {
         try right.writer().print(" | Open:{d}ms", .{self.ui.file_open_last_ms});
     }
@@ -339,6 +351,54 @@ pub fn diagnosticSymbolRangeOnLine(self: anytype, line_index: usize, line: []con
         };
     }
     return null;
+}
+
+pub fn selectionOccurrencesOnLineOwned(
+    self: anytype,
+    allocator: std.mem.Allocator,
+    line_index: usize,
+    line: []const u8,
+) ![]ByteRange {
+    if (self.editor.selection_mode != .linear) return allocator.alloc(ByteRange, 0);
+    const selected = self.selectedRange() orelse return allocator.alloc(ByteRange, 0);
+    if (selected.end <= selected.start) return allocator.alloc(ByteRange, 0);
+
+    const selected_len = selected.end - selected.start;
+    if (selected_len > 64) return allocator.alloc(ByteRange, 0);
+
+    const selected_start_line = self.editor.buffer.lineColFromOffset(selected.start).line;
+    const selected_end_line = self.editor.buffer.lineColFromOffset(selected.end - 1).line;
+    if (selected_start_line != selected_end_line) return allocator.alloc(ByteRange, 0);
+
+    const selected_line_start = self.editor.buffer.offsetFromLineCol(selected_start_line, 0);
+    const selected_line_end = self.editor.buffer.offsetFromLineCol(selected_start_line, std.math.maxInt(usize));
+    if (selected.start < selected_line_start or selected.end > selected_line_end) {
+        return allocator.alloc(ByteRange, 0);
+    }
+
+    const selected_line = if (selected_start_line == line_index)
+        line
+    else
+        try self.editor.buffer.lineOwned(allocator, selected_start_line);
+    if (selected_start_line != line_index) allocator.free(selected_line);
+
+    const selection_start_in_line = selected.start - selected_line_start;
+    const selection_end_in_line = selected.end - selected_line_start;
+    if (selection_end_in_line <= selection_start_in_line or selection_end_in_line > selected_line.len) {
+        return allocator.alloc(ByteRange, 0);
+    }
+
+    const needle = selected_line[selection_start_in_line..selection_end_in_line];
+    if (needle.len == 0 or std.mem.indexOfAny(u8, needle, " \t\r\n") != null) {
+        return allocator.alloc(ByteRange, 0);
+    }
+
+    var ranges = std.array_list.Managed(ByteRange).init(allocator);
+    errdefer ranges.deinit();
+
+    const skip_start = if (selected_start_line == line_index) selection_start_in_line else null;
+    try appendNeedleRanges(&ranges, line, needle, skip_start);
+    return ranges.toOwnedSlice();
 }
 
 pub fn renderPalette(self: anytype, out: *std.array_list.Managed(u8), frame_allocator: std.mem.Allocator) !void {
@@ -868,23 +928,72 @@ fn renderHighlighted(out: *std.array_list.Managed(u8), line: []const u8, spans: 
     try renderHighlightedRange(out, line, spans, 0, line.len);
 }
 
-fn renderHighlightedWithOverlay(
+const StyledOverlay = struct {
+    range: ByteRange,
+    ansi: []const u8,
+    priority: u8,
+};
+
+fn renderHighlightedWithOverlays(
     out: *std.array_list.Managed(u8),
     line: []const u8,
     spans: []const highlighter.Span,
-    overlay: ByteRange,
-    ansi: []const u8,
+    overlays: []const StyledOverlay,
 ) !void {
-    const start = @min(overlay.start, line.len);
-    const end = @min(overlay.end, line.len);
+    var pos: usize = 0;
+    while (pos < line.len) {
+        var next = line.len;
+        var active_index: ?usize = null;
 
-    try renderHighlightedRange(out, line, spans, 0, start);
-    if (end > start) {
-        try out.appendSlice(ansi);
-        try out.appendSlice(line[start..end]);
-        try out.appendSlice("\x1b[0m");
+        for (overlays, 0..) |overlay, index| {
+            const start = @min(overlay.range.start, line.len);
+            const end = @min(overlay.range.end, line.len);
+            if (end <= start) continue;
+
+            if (start <= pos and pos < end) {
+                if (active_index == null or overlay.priority > overlays[active_index.?].priority) {
+                    active_index = index;
+                }
+                if (end < next) next = end;
+            } else if (start > pos and start < next) {
+                next = start;
+            }
+        }
+
+        if (next <= pos) {
+            pos += 1;
+            continue;
+        }
+
+        if (active_index) |index| {
+            try out.appendSlice(overlays[index].ansi);
+            try out.appendSlice(line[pos..next]);
+            try out.appendSlice("\x1b[0m");
+        } else {
+            try renderHighlightedRange(out, line, spans, pos, next);
+        }
+        pos = next;
     }
-    try renderHighlightedRange(out, line, spans, end, line.len);
+}
+
+fn appendNeedleRanges(
+    ranges: *std.array_list.Managed(ByteRange),
+    line: []const u8,
+    needle: []const u8,
+    skip_start: ?usize,
+) !void {
+    if (needle.len == 0) return;
+
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, line, pos, needle)) |index| {
+        if (skip_start == null or skip_start.? != index) {
+            try ranges.append(.{
+                .start = index,
+                .end = index + needle.len,
+            });
+        }
+        pos = index + needle.len;
+    }
 }
 
 fn renderHighlightedRange(
@@ -994,4 +1103,16 @@ fn displayWidth(bytes: []const u8, tab_width_input: usize) usize {
 
 fn byteLimitForDisplayWidth(bytes: []const u8, max_width: usize, tab_width_input: usize) usize {
     return layout.byteLimitForDisplayWidth(bytes, max_width, tab_width_input);
+}
+
+test "appendNeedleRanges returns non-overlapping ranges and skips one source match" {
+    var ranges = std.array_list.Managed(ByteRange).init(std.testing.allocator);
+    defer ranges.deinit();
+
+    try appendNeedleRanges(&ranges, "foo bar foo foo", "foo", 8);
+    try std.testing.expectEqual(@as(usize, 2), ranges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ranges.items[0].start);
+    try std.testing.expectEqual(@as(usize, 3), ranges.items[0].end);
+    try std.testing.expectEqual(@as(usize, 12), ranges.items[1].start);
+    try std.testing.expectEqual(@as(usize, 15), ranges.items[1].end);
 }

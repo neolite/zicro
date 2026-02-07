@@ -60,6 +60,7 @@ pub const App = struct {
     ui: UiState,
     lsp_state: LspState,
     highlight_state_cache: std.array_list.Managed(highlighter.LineState),
+    extra_cursors: std.array_list.Managed(usize),
     project_root: ?[]u8,
     file_index: std.array_list.Managed([]u8),
     file_access_tick: u64,
@@ -100,6 +101,7 @@ pub const App = struct {
                 @as(i128, @intCast(config.lsp_change_debounce_ms)) * std.time.ns_per_ms,
             ),
             .highlight_state_cache = std.array_list.Managed(highlighter.LineState).init(allocator),
+            .extra_cursors = std.array_list.Managed(usize).init(allocator),
             .project_root = null,
             .file_index = std.array_list.Managed([]u8).init(allocator),
             .file_access_tick = 0,
@@ -134,6 +136,7 @@ pub const App = struct {
         self.editor.buffer.deinit();
         if (self.editor.file_path) |path| self.allocator.free(path);
         self.highlight_state_cache.deinit();
+        self.extra_cursors.deinit();
         if (self.project_root) |root| self.allocator.free(root);
         for (self.file_index.items) |path| self.allocator.free(path);
         self.file_index.deinit();
@@ -325,6 +328,10 @@ pub const App = struct {
         switch (event) {
             .char => |ch| {
                 if (try self.applyBlockTextInput(&[_]u8{ch})) return;
+                if (try self.applyTextInputToCursors(&[_]u8{ch})) {
+                    self.markBufferEdited();
+                    return;
+                }
                 _ = try self.deleteSelectionIfAny();
                 try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, &[_]u8{ch});
                 try self.editor.buffer.insert(self.editor.cursor, &[_]u8{ch});
@@ -334,6 +341,10 @@ pub const App = struct {
             .text => |text| {
                 if (text.len == 0) return;
                 if (try self.applyBlockTextInput(text)) return;
+                if (try self.applyTextInputToCursors(text)) {
+                    self.markBufferEdited();
+                    return;
+                }
                 _ = try self.deleteSelectionIfAny();
                 try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, text);
                 try self.editor.buffer.insert(self.editor.cursor, text);
@@ -344,11 +355,18 @@ pub const App = struct {
                 var spaces = [_]u8{' '} ** 16;
                 const count = @min(@as(usize, self.config.tab_width), spaces.len);
                 if (try self.applyBlockTextInput(spaces[0..count])) return;
+                if (try self.applyTextInputToCursors(spaces[0..count])) {
+                    self.markBufferEdited();
+                    return;
+                }
                 _ = try self.deleteSelectionIfAny();
                 try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, spaces[0..count]);
                 try self.editor.buffer.insert(self.editor.cursor, spaces[0..count]);
                 self.editor.cursor += count;
                 self.markBufferEdited();
+            },
+            .alt_click => |click| {
+                self.addCursorAtScreenCell(click.row, click.col);
             },
             else => {},
         }
@@ -937,6 +955,7 @@ pub const App = struct {
         self.editor.cursor = 0;
         self.editor.selection_anchor = null;
         self.editor.selection_mode = .linear;
+        self.extra_cursors.clearRetainingCapacity();
         self.editor.search_match = null;
         self.editor.scroll_y = 0;
         self.editor.dirty = false;
@@ -961,10 +980,28 @@ pub const App = struct {
         try self.noteFileAccess(path);
     }
 
+    fn shouldClearMultiCursorForCommand(command: Command) bool {
+        return switch (command) {
+            .toggle_comment,
+            .paste,
+            .backspace,
+            .delete_char,
+            .insert_newline,
+            .add_cursor_up,
+            .add_cursor_down,
+            .clear_multi_cursor,
+            => false,
+            else => true,
+        };
+    }
+
     fn executeCommand(self: *App, command: Command) !void {
         switch (command) {
             .lsp_hover, .lsp_completion, .lsp_definition, .lsp_references, .lsp_jump_back => {},
             else => self.clearHoverTooltip(),
+        }
+        if (shouldClearMultiCursorForCommand(command)) {
+            self.clearExtraCursors();
         }
 
         switch (command) {
@@ -1097,6 +1134,16 @@ pub const App = struct {
                 self.beginBlockSelection();
                 self.moveVertical(1);
             },
+            .add_cursor_up => {
+                self.addCursorVertical(-1);
+            },
+            .add_cursor_down => {
+                self.addCursorVertical(1);
+            },
+            .clear_multi_cursor => {
+                self.clearExtraCursors();
+                try self.setStatus("Multi-cursor: cleared");
+            },
             .word_left => {
                 self.clearSelection();
                 self.editor.cursor = self.editor.buffer.moveWordLeft(self.editor.cursor);
@@ -1115,6 +1162,10 @@ pub const App = struct {
                     }
                 }
                 if (try self.deleteSelectionIfAny()) {
+                    self.markBufferEdited();
+                    return;
+                }
+                if (try self.backspaceAtCursors()) {
                     self.markBufferEdited();
                     return;
                 }
@@ -1139,6 +1190,10 @@ pub const App = struct {
                     self.markBufferEdited();
                     return;
                 }
+                if (try self.deleteAtCursors()) {
+                    self.markBufferEdited();
+                    return;
+                }
                 if (self.editor.cursor < self.editor.buffer.len()) {
                     const end = self.editor.buffer.nextCodepointEnd(self.editor.cursor);
                     if (end > self.editor.cursor) {
@@ -1154,6 +1209,10 @@ pub const App = struct {
                         self.markBufferEditedForceFullSync();
                         return;
                     }
+                }
+                if (try self.applyTextInputToCursors("\n")) {
+                    self.markBufferEdited();
+                    return;
                 }
                 _ = try self.deleteSelectionIfAny();
                 try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, "\n");
@@ -1984,12 +2043,31 @@ pub const App = struct {
     }
 
     fn toggleCommentSelection(self: *App) !void {
+        if (self.hasMultipleCursors()) {
+            const lines = try self.cursorLineSetOwned(self.allocator);
+            defer self.allocator.free(lines);
+            if (lines.len == 0) return;
+
+            try self.toggleCommentAtLines(lines);
+            self.clearSelection();
+            self.clearExtraCursors();
+            self.markBufferEditedForceFullSync();
+            return;
+        }
+
         const line_range = self.selectedLineRange();
+        try self.toggleCommentInRange(line_range.start, line_range.end);
+
+        self.clearSelection();
+        self.markBufferEditedForceFullSync();
+    }
+
+    fn toggleCommentInRange(self: *App, start_line: usize, end_line: usize) !void {
         var non_empty: usize = 0;
         var commented: usize = 0;
 
-        var scan = line_range.start;
-        while (scan <= line_range.end) : (scan += 1) {
+        var scan = start_line;
+        while (scan <= end_line) : (scan += 1) {
             const line = try self.editor.buffer.lineOwned(self.allocator, scan);
             defer self.allocator.free(line);
 
@@ -2002,8 +2080,8 @@ pub const App = struct {
 
         const uncomment = non_empty > 0 and commented == non_empty;
 
-        var line_i64: i64 = @intCast(line_range.end);
-        while (line_i64 >= @as(i64, @intCast(line_range.start))) : (line_i64 -= 1) {
+        var line_i64: i64 = @intCast(end_line);
+        while (line_i64 >= @as(i64, @intCast(start_line))) : (line_i64 -= 1) {
             const line_index: usize = @intCast(line_i64);
             const line = try self.editor.buffer.lineOwned(self.allocator, line_index);
             defer self.allocator.free(line);
@@ -2025,9 +2103,49 @@ pub const App = struct {
                 try self.editor.buffer.insert(insert_at, "// ");
             }
         }
+    }
 
-        self.clearSelection();
-        self.markBufferEditedForceFullSync();
+    fn toggleCommentAtLines(self: *App, lines: []const usize) !void {
+        var non_empty: usize = 0;
+        var commented: usize = 0;
+
+        for (lines) |line_index| {
+            const line = try self.editor.buffer.lineOwned(self.allocator, line_index);
+            defer self.allocator.free(line);
+
+            const info = lineCommentInfo(line);
+            if (!info.empty) {
+                non_empty += 1;
+                if (info.has_comment) commented += 1;
+            }
+        }
+
+        const uncomment = non_empty > 0 and commented == non_empty;
+
+        var i = lines.len;
+        while (i > 0) {
+            i -= 1;
+            const line_index = lines[i];
+            const line = try self.editor.buffer.lineOwned(self.allocator, line_index);
+            defer self.allocator.free(line);
+
+            const info = lineCommentInfo(line);
+            if (info.empty) continue;
+
+            const line_start = self.editor.buffer.offsetFromLineCol(line_index, 0);
+            if (uncomment) {
+                if (!info.has_comment) continue;
+                const comment_at = line_start + info.comment_col;
+                var remove_len: usize = 2;
+                if (info.comment_col + 2 < line.len and line[info.comment_col + 2] == ' ') {
+                    remove_len = 3;
+                }
+                try self.editor.buffer.delete(comment_at, remove_len);
+            } else {
+                const insert_at = line_start + info.indent_col;
+                try self.editor.buffer.insert(insert_at, "// ");
+            }
+        }
     }
 
     fn copySelectionToClipboard(self: *App) !void {
@@ -2074,6 +2192,10 @@ pub const App = struct {
 
         if (text.len == 0) return;
         if (try self.applyBlockTextInput(text)) return;
+        if (try self.applyTextInputToCursors(text)) {
+            self.markBufferEdited();
+            return;
+        }
         _ = try self.deleteSelectionIfAny();
         try self.queueIncrementalChange(self.editor.cursor, self.editor.cursor, text);
         try self.editor.buffer.insert(self.editor.cursor, text);
@@ -2199,7 +2321,7 @@ pub const App = struct {
         self.editor.dirty = true;
         self.editor.confirm_quit = false;
         self.editor.search_match = null;
-        self.invalidateHighlightCacheFromCursor();
+        self.invalidateHighlightCacheFromLine(self.minCursorLine());
         if (self.config.lsp_hover_hide_on_type) {
             self.clearHoverTooltip();
         }
@@ -2220,7 +2342,277 @@ pub const App = struct {
         self.markBufferEdited();
     }
 
+    fn minCursorLine(self: *const App) usize {
+        var min_line = self.editor.buffer.lineColFromOffset(self.editor.cursor).line;
+        for (self.extra_cursors.items) |offset| {
+            const clamped = @min(offset, self.editor.buffer.len());
+            const line = self.editor.buffer.lineColFromOffset(clamped).line;
+            if (line < min_line) min_line = line;
+        }
+        return min_line;
+    }
+
+    fn hasMultipleCursors(self: *const App) bool {
+        return self.extra_cursors.items.len > 0;
+    }
+
+    fn clearExtraCursors(self: *App) void {
+        self.extra_cursors.clearRetainingCapacity();
+    }
+
+    fn normalizeExtraCursors(self: *App) void {
+        const max_offset = self.editor.buffer.len();
+
+        var write: usize = 0;
+        for (self.extra_cursors.items) |offset| {
+            const clamped = @min(offset, max_offset);
+            if (clamped == self.editor.cursor) continue;
+            self.extra_cursors.items[write] = clamped;
+            write += 1;
+        }
+        self.extra_cursors.items.len = write;
+        if (self.extra_cursors.items.len <= 1) return;
+
+        std.mem.sort(usize, self.extra_cursors.items, {}, comptime std.sort.asc(usize));
+        write = 1;
+        var i: usize = 1;
+        while (i < self.extra_cursors.items.len) : (i += 1) {
+            if (self.extra_cursors.items[i] == self.extra_cursors.items[write - 1]) continue;
+            self.extra_cursors.items[write] = self.extra_cursors.items[i];
+            write += 1;
+        }
+        self.extra_cursors.items.len = write;
+    }
+
+    fn allCursorOffsetsOwned(self: *const App, allocator: std.mem.Allocator) ![]usize {
+        var offsets = std.array_list.Managed(usize).init(allocator);
+        errdefer offsets.deinit();
+
+        try offsets.append(self.editor.cursor);
+        try offsets.appendSlice(self.extra_cursors.items);
+
+        std.mem.sort(usize, offsets.items, {}, comptime std.sort.asc(usize));
+        if (offsets.items.len > 1) {
+            var write: usize = 1;
+            var i: usize = 1;
+            while (i < offsets.items.len) : (i += 1) {
+                if (offsets.items[i] == offsets.items[write - 1]) continue;
+                offsets.items[write] = offsets.items[i];
+                write += 1;
+            }
+            offsets.items.len = write;
+        }
+
+        return offsets.toOwnedSlice();
+    }
+
+    fn cursorLineSetOwned(self: *const App, allocator: std.mem.Allocator) ![]usize {
+        const offsets = try self.allCursorOffsetsOwned(allocator);
+        defer allocator.free(offsets);
+
+        var lines = std.array_list.Managed(usize).init(allocator);
+        errdefer lines.deinit();
+
+        for (offsets) |offset| {
+            const line = self.editor.buffer.lineColFromOffset(@min(offset, self.editor.buffer.len())).line;
+            if (lines.items.len == 0 or lines.items[lines.items.len - 1] != line) {
+                try lines.append(line);
+            }
+        }
+        return lines.toOwnedSlice();
+    }
+
+    fn setCursorSetFromSortedOffsets(self: *App, offsets: []const usize, primary_index: usize) void {
+        if (offsets.len == 0 or primary_index >= offsets.len) return;
+
+        self.editor.cursor = offsets[primary_index];
+        self.extra_cursors.clearRetainingCapacity();
+        for (offsets, 0..) |offset, index| {
+            if (index == primary_index) continue;
+            self.extra_cursors.append(offset) catch {};
+        }
+        self.normalizeExtraCursors();
+    }
+
+    fn applyTextInputToCursors(self: *App, text: []const u8) !bool {
+        if (!self.hasMultipleCursors()) return false;
+        if (text.len == 0) return true;
+        if (self.editor.selection_anchor != null) return false;
+
+        const offsets = try self.allCursorOffsetsOwned(self.allocator);
+        defer self.allocator.free(offsets);
+        if (offsets.len <= 1) return false;
+
+        var primary_index: usize = 0;
+        for (offsets, 0..) |offset, index| {
+            if (offset == self.editor.cursor) {
+                primary_index = index;
+                break;
+            }
+        }
+
+        var new_offsets = try self.allocator.alloc(usize, offsets.len);
+        defer self.allocator.free(new_offsets);
+
+        var shift: i64 = 0;
+        for (offsets, 0..) |offset, index| {
+            const base: i64 = @intCast(offset);
+            const pos_i64 = base + shift;
+            const pos: usize = @intCast(@max(@as(i64, 0), pos_i64));
+            try self.queueIncrementalChange(pos, pos, text);
+            try self.editor.buffer.insert(pos, text);
+            shift += @as(i64, @intCast(text.len));
+            new_offsets[index] = pos + text.len;
+        }
+
+        self.setCursorSetFromSortedOffsets(new_offsets, primary_index);
+        return true;
+    }
+
+    fn backspaceAtCursors(self: *App) !bool {
+        if (!self.hasMultipleCursors()) return false;
+        if (self.editor.selection_anchor != null) return false;
+
+        const offsets = try self.allCursorOffsetsOwned(self.allocator);
+        defer self.allocator.free(offsets);
+        if (offsets.len <= 1) return false;
+
+        var primary_index: usize = 0;
+        for (offsets, 0..) |offset, index| {
+            if (offset == self.editor.cursor) {
+                primary_index = index;
+                break;
+            }
+        }
+
+        var new_offsets = try self.allocator.alloc(usize, offsets.len);
+        defer self.allocator.free(new_offsets);
+
+        var changed = false;
+        var shift: i64 = 0;
+        for (offsets, 0..) |offset, index| {
+            const len_i64: i64 = @intCast(self.editor.buffer.len());
+            const pos_i64 = std.math.clamp(@as(i64, @intCast(offset)) + shift, 0, len_i64);
+            const pos: usize = @intCast(pos_i64);
+
+            if (pos == 0) {
+                new_offsets[index] = 0;
+                continue;
+            }
+
+            const start = self.editor.buffer.prevCodepointStart(pos);
+            if (start < pos) {
+                try self.queueIncrementalChange(start, pos, "");
+                try self.editor.buffer.delete(start, pos - start);
+                shift -= @as(i64, @intCast(pos - start));
+                new_offsets[index] = start;
+                changed = true;
+            } else {
+                new_offsets[index] = pos;
+            }
+        }
+
+        if (!changed) return false;
+        self.setCursorSetFromSortedOffsets(new_offsets, primary_index);
+        return true;
+    }
+
+    fn deleteAtCursors(self: *App) !bool {
+        if (!self.hasMultipleCursors()) return false;
+        if (self.editor.selection_anchor != null) return false;
+
+        const offsets = try self.allCursorOffsetsOwned(self.allocator);
+        defer self.allocator.free(offsets);
+        if (offsets.len <= 1) return false;
+
+        var primary_index: usize = 0;
+        for (offsets, 0..) |offset, index| {
+            if (offset == self.editor.cursor) {
+                primary_index = index;
+                break;
+            }
+        }
+
+        var new_offsets = try self.allocator.alloc(usize, offsets.len);
+        defer self.allocator.free(new_offsets);
+
+        var changed = false;
+        var shift: i64 = 0;
+        for (offsets, 0..) |offset, index| {
+            const len_i64: i64 = @intCast(self.editor.buffer.len());
+            const pos_i64 = std.math.clamp(@as(i64, @intCast(offset)) + shift, 0, len_i64);
+            const pos: usize = @intCast(pos_i64);
+
+            if (pos >= self.editor.buffer.len()) {
+                new_offsets[index] = self.editor.buffer.len();
+                continue;
+            }
+
+            const end = self.editor.buffer.nextCodepointEnd(pos);
+            if (end > pos) {
+                try self.queueIncrementalChange(pos, end, "");
+                try self.editor.buffer.delete(pos, end - pos);
+                shift -= @as(i64, @intCast(end - pos));
+                changed = true;
+            }
+            new_offsets[index] = pos;
+        }
+
+        if (!changed) return false;
+        self.setCursorSetFromSortedOffsets(new_offsets, primary_index);
+        return true;
+    }
+
+    fn addCursorVertical(self: *App, delta: i32) void {
+        self.clearSelection();
+
+        const base = self.editor.cursor;
+        const pos = self.editor.buffer.lineColFromOffset(base);
+        const visual_col = self.editor.preferred_visual_col orelse
+            self.editor.buffer.visualColumnFromOffset(base, terminal_tab_width);
+        const line_i64 = @as(i64, @intCast(pos.line));
+        const target_line_i64 = std.math.clamp(line_i64 + delta, 0, @as(i64, @intCast(self.editor.buffer.lineCount() - 1)));
+        const target_line: usize = @intCast(target_line_i64);
+        if (target_line == pos.line) return;
+
+        const target = self.editor.buffer.offsetFromLineVisualCol(target_line, visual_col, terminal_tab_width);
+        self.extra_cursors.append(base) catch {};
+        self.editor.cursor = target;
+        self.editor.preferred_visual_col = visual_col;
+        self.normalizeExtraCursors();
+    }
+
+    fn addCursorAtOffset(self: *App, target_input: usize) void {
+        self.clearSelection();
+
+        const target = @min(target_input, self.editor.buffer.len());
+        if (target == self.editor.cursor) return;
+
+        self.extra_cursors.append(self.editor.cursor) catch {};
+        self.editor.cursor = target;
+        self.editor.preferred_visual_col = self.editor.buffer.visualColumnFromOffset(target, terminal_tab_width);
+        self.normalizeExtraCursors();
+    }
+
+    fn addCursorAtScreenCell(self: *App, row: usize, col: usize) void {
+        if (row < top_bar_rows) return;
+
+        const text_rows = self.editorTextRows();
+        if (text_rows == 0) return;
+
+        const text_row = row - top_bar_rows;
+        if (text_row >= text_rows) return;
+
+        const line_index = self.editor.scroll_y + text_row;
+        if (line_index >= self.editor.buffer.lineCount()) return;
+
+        const visual_col = col -| line_gutter_cols;
+        const target = self.editor.buffer.offsetFromLineVisualCol(line_index, visual_col, terminal_tab_width);
+        self.addCursorAtOffset(target);
+    }
+
     fn beginSelection(self: *App) void {
+        self.clearExtraCursors();
         if (self.editor.selection_mode != .linear) {
             self.editor.selection_anchor = self.editor.cursor;
         }
@@ -2229,6 +2621,7 @@ pub const App = struct {
     }
 
     fn beginBlockSelection(self: *App) void {
+        self.clearExtraCursors();
         if (self.editor.selection_mode != .block) {
             self.editor.selection_anchor = self.editor.cursor;
         }

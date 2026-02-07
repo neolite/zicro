@@ -1,8 +1,8 @@
 # Zicro Roadmap
 
 Updated: 2026-02-07
-Current phase: Phase 4
-Current focus: multiline syntax highlighting (block comments/template strings) and tokenizer regressions
+Current phase: Phase 6
+Current focus: test expansion, release hardening, and matrix validation for LSP fallbacks/perf
 
 ## Phase Gate (Required for every phase)
 - [x] Run `zig fmt` on changed Zig files.
@@ -70,10 +70,17 @@ Phase 4 notes:
 - 2026-02-07: Added Bash heredoc highlighting state (`<<`, `<<-`, quoted delimiters), heredoc tokenizer regression tests, and validated Phase 4 gate (`zig fmt`, `zig build`, `zig build test`) on Zig `0.15.2`.
 
 ## Phase 5 - Editing Model Enhancements
-- [ ] Implement true multi-cursor model (multiple carets, not only block selection).
-- [ ] Implement multi-cursor insert/delete/comment flows.
-- [ ] Define interaction rules between multi-cursor, block selection, and search mode.
-- [ ] Remove cursor/selection visual artifacts under fast typing and scrolling.
+- [x] Implement true multi-cursor model (multiple carets, not only block selection).
+- [x] Implement multi-cursor insert/delete/comment flows.
+- [x] Define interaction rules between multi-cursor, block selection, and search mode.
+- [x] Remove cursor/selection visual artifacts under fast typing and scrolling.
+
+Phase 5 notes:
+- 2026-02-07: Added true multi-cursor state (`extra_cursors`) with vertical add/remove commands and status-bar cursor count (`MC:n`).
+- 2026-02-07: Added multi-cursor edit flows for insert, paste, newline, backspace, delete, and line comment toggle with deterministic offset remapping.
+- 2026-02-07: Defined interactions: entering linear/block selection or most non-edit commands exits multi-cursor mode; search commands also clear extra carets.
+- 2026-02-07: Reduced highlighting artifacts during multi-cursor edits by invalidating syntax state cache from the earliest active cursor line.
+- 2026-02-07: Validated Phase 5 gate on Zig `0.15.2` (`zig fmt`, `zig build`, `zig build test`).
 
 ## Phase 6 - Test Expansion and Release Hardening
 - [ ] Add UTF-8 edge tests for buffer operations (insert/delete/move/undo/redo).
