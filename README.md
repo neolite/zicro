@@ -3,6 +3,10 @@
 `zicro` is a fast terminal editor written in Zig for macOS and Linux.
 Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and practical LSP features.
 
+
+<img width="744" height="575" alt="image" src="https://github.com/user-attachments/assets/8d8c69dc-c31e-4a99-ac7d-856831fad4b1" />
+
+
 ## Features
 
 - Piece-table buffer with undo/redo and UTF-8 safe cursor movement.
