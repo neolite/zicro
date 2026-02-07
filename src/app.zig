@@ -108,6 +108,7 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         var next_spinner_frame_ns: i128 = 0;
+        var last_pending_requests: usize = 0;
         while (self.ui.running) {
             var handled_events: usize = 0;
             while (handled_events < max_events_per_tick) {
@@ -137,6 +138,10 @@ pub const App = struct {
                 }
 
                 const pending_requests = self.lsp_state.client.diagnostics().pending_requests;
+                if (pending_requests != last_pending_requests) {
+                    self.ui.needs_render = true;
+                    last_pending_requests = pending_requests;
+                }
                 if (pending_requests > 0) {
                     const now = std.time.nanoTimestamp();
                     if (next_spinner_frame_ns == 0 or now >= next_spinner_frame_ns) {
@@ -147,6 +152,10 @@ pub const App = struct {
                     next_spinner_frame_ns = 0;
                 }
             } else {
+                if (last_pending_requests != 0) {
+                    self.ui.needs_render = true;
+                    last_pending_requests = 0;
+                }
                 next_spinner_frame_ns = 0;
             }
 
