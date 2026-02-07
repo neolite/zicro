@@ -59,7 +59,7 @@ Phase 3 notes:
 ## Phase 4 - Syntax Highlighting Upgrade
 - [x] Add multiline block comment support (`/* ... */`) for JS/TS.
 - [x] Add template literal handling for JS/TS.
-- [ ] Add heredoc handling for shell-like languages where applicable.
+- [x] Add heredoc handling for shell-like languages where applicable.
 - [x] Replace linear keyword lookup with `ComptimeStringMap` where suitable.
 - [x] Add tokenizer regression tests for multiline edge cases.
 
@@ -67,6 +67,7 @@ Phase 4 notes:
 - 2026-02-07: Added stateful multiline highlighter for JS/TS (`/* ... */` and template literals with `${...}` cross-line state).
 - 2026-02-07: Replaced linear keyword matching with `std.StaticStringMap` and added multiline regression tests.
 - 2026-02-07: Added cross-file LSP jump + path-aware jump-back stack (guard: switching files is blocked while current buffer is dirty).
+- 2026-02-07: Added Bash heredoc highlighting state (`<<`, `<<-`, quoted delimiters), heredoc tokenizer regression tests, and validated Phase 4 gate (`zig fmt`, `zig build`, `zig build test`) on Zig `0.15.2`.
 
 ## Phase 5 - Editing Model Enhancements
 - [ ] Implement true multi-cursor model (multiple carets, not only block selection).

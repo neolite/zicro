@@ -14,6 +14,9 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
 - Stateful JS/TS multiline highlighting:
   - block comments (`/* ... */`) across lines
   - template literals with `${...}` across lines
+- Stateful Bash heredoc highlighting:
+  - heredoc start forms `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`
+  - multiline state tracking until exact terminator line
 - VSCode-style editing keys (`Ctrl+S`, `Ctrl+Q`, `Ctrl+Z`, `Ctrl+Y`, etc.).
 - Linear selection (`Shift+Arrows`) and block selection (`Option+Arrows`).
 - Clipboard copy/cut/paste (`Ctrl+C`, `Ctrl+K`, `Ctrl+V`) without line numbers.

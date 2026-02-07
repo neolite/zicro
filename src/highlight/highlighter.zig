@@ -31,6 +31,11 @@ pub const LineState = struct {
     template_expr_depth: u32 = 0,
     in_jsx_tag: bool = false,
     jsx_attr_quote: ?u8 = null,
+    in_heredoc: bool = false,
+    heredoc_delim_len: u8 = 0,
+    heredoc_delim: [64]u8 = [_]u8{0} ** 64,
+    heredoc_strip_tabs: bool = false,
+    heredoc_quoted_delim: bool = false,
 };
 
 pub const LineHighlight = struct {
@@ -115,6 +120,16 @@ const ts_js_keywords = std.StaticStringMap(void).initComptime(.{
     .{ "never", {} },
     .{ "any", {} },
     .{ "void", {} },
+    .{ "string", {} },
+    .{ "number", {} },
+    .{ "boolean", {} },
+    .{ "bigint", {} },
+    .{ "symbol", {} },
+    .{ "object", {} },
+    .{ "undefined", {} },
+    .{ "null", {} },
+    .{ "true", {} },
+    .{ "false", {} },
     .{ "typeof", {} },
     .{ "instanceof", {} },
     .{ "delete", {} },
@@ -204,9 +219,18 @@ fn scanLine(
 ) !LineState {
     var state = state_in;
     const is_js_ts = language == .javascript or language == .typescript;
+    const is_bash = language == .bash;
 
     var i: usize = 0;
     while (i < line.len) {
+        if (is_bash and state.in_heredoc) {
+            try appendSpan(spans_opt, 0, line.len, .string);
+            if (isBashHeredocTerminator(line, &state)) {
+                clearHeredocState(&state);
+            }
+            return state;
+        }
+
         if (is_js_ts and state.in_jsx_tag) {
             i = try scanJsxTag(spans_opt, line, i, &state);
             if (i >= line.len) return state;
@@ -281,6 +305,19 @@ fn scanLine(
             continue;
         }
 
+        if (is_bash and ch == '<' and i + 1 < line.len and line[i + 1] == '<') {
+            const heredoc = scanBashHeredocStart(line, i);
+            try appendSpan(spans_opt, i, heredoc.operator_end, .operator);
+            if (heredoc.word_end > heredoc.word_start) {
+                try appendSpan(spans_opt, heredoc.word_start, heredoc.word_end, .string);
+            }
+            if (heredoc.valid) {
+                setBashHeredocState(&state, line, heredoc);
+            }
+            i = heredoc.next_index;
+            continue;
+        }
+
         if (is_js_ts and state.in_template_string and state.template_expr_depth > 0) {
             if (ch == '{') {
                 state.template_expr_depth += 1;
@@ -333,6 +370,123 @@ fn scanLine(
     }
 
     return state;
+}
+
+const BashHeredocStart = struct {
+    operator_end: usize,
+    word_start: usize,
+    word_end: usize,
+    word_unquoted_start: usize,
+    word_unquoted_end: usize,
+    strip_tabs: bool,
+    quoted_delim: bool,
+    valid: bool,
+    next_index: usize,
+};
+
+fn scanBashHeredocStart(line: []const u8, start: usize) BashHeredocStart {
+    var out = BashHeredocStart{
+        .operator_end = start + 2,
+        .word_start = start + 2,
+        .word_end = start + 2,
+        .word_unquoted_start = start + 2,
+        .word_unquoted_end = start + 2,
+        .strip_tabs = false,
+        .quoted_delim = false,
+        .valid = false,
+        .next_index = start + 2,
+    };
+
+    if (start + 2 < line.len and line[start + 2] == '<') {
+        out.operator_end = start + 3;
+        out.next_index = start + 3;
+        return out;
+    }
+
+    var i = start + 2;
+    if (i < line.len and line[i] == '-') {
+        out.strip_tabs = true;
+        i += 1;
+        out.operator_end = i;
+        out.next_index = i;
+    }
+
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    out.word_start = i;
+
+    if (i >= line.len) {
+        out.next_index = i;
+        return out;
+    }
+
+    if (line[i] == '\'' or line[i] == '"') {
+        const quote = line[i];
+        const end = scanQuotedString(line, i, quote);
+        out.word_end = end;
+        out.word_unquoted_start = i + 1;
+        out.word_unquoted_end = if (end > i and end <= line.len and line[end - 1] == quote) end - 1 else i + 1;
+        out.quoted_delim = true;
+        out.valid = end > i + 1 and end <= line.len and line[end - 1] == quote;
+        out.next_index = end;
+        return out;
+    }
+
+    if (line[i] == '\\') {
+        out.quoted_delim = true;
+        i += 1;
+        out.word_unquoted_start = i;
+    } else {
+        out.word_unquoted_start = i;
+    }
+
+    while (i < line.len and !isBashWordBoundary(line[i])) : (i += 1) {}
+
+    out.word_end = i;
+    out.word_unquoted_end = i;
+    out.valid = out.word_unquoted_end > out.word_unquoted_start;
+    out.next_index = i;
+    return out;
+}
+
+fn setBashHeredocState(state: *LineState, line: []const u8, heredoc: BashHeredocStart) void {
+    if (!heredoc.valid) return;
+    const delim_len = heredoc.word_unquoted_end - heredoc.word_unquoted_start;
+    if (delim_len == 0 or delim_len > state.heredoc_delim.len) return;
+
+    @memset(state.heredoc_delim[0..], 0);
+    std.mem.copyForwards(u8, state.heredoc_delim[0..delim_len], line[heredoc.word_unquoted_start..heredoc.word_unquoted_end]);
+    state.in_heredoc = true;
+    state.heredoc_delim_len = @as(u8, @intCast(delim_len));
+    state.heredoc_strip_tabs = heredoc.strip_tabs;
+    state.heredoc_quoted_delim = heredoc.quoted_delim;
+}
+
+fn clearHeredocState(state: *LineState) void {
+    state.in_heredoc = false;
+    state.heredoc_delim_len = 0;
+    @memset(state.heredoc_delim[0..], 0);
+    state.heredoc_strip_tabs = false;
+    state.heredoc_quoted_delim = false;
+}
+
+fn isBashHeredocTerminator(line: []const u8, state: *const LineState) bool {
+    if (!state.in_heredoc or state.heredoc_delim_len == 0) return false;
+
+    var start: usize = 0;
+    if (state.heredoc_strip_tabs) {
+        while (start < line.len and line[start] == '\t') : (start += 1) {}
+    }
+
+    const delim_len: usize = @as(usize, state.heredoc_delim_len);
+    const delim = state.heredoc_delim[0..delim_len];
+    return std.mem.eql(u8, line[start..], delim);
+}
+
+fn isBashWordBoundary(ch: u8) bool {
+    return std.ascii.isWhitespace(ch) or switch (ch) {
+        ';', '&', '|', '<', '>', '(', ')' => true,
+        else => false,
+    };
 }
 
 fn scanJsxTag(
@@ -639,6 +793,13 @@ fn isOperator(ch: u8) bool {
     };
 }
 
+fn hasTokenSpan(spans: []const Span, token: TokenType, start: usize, end: usize) bool {
+    for (spans) |span| {
+        if (span.token == token and span.start == start and span.end == end) return true;
+    }
+    return false;
+}
+
 test "zig keyword highlighting" {
     const allocator = std.testing.allocator;
     const spans = try highlightLine(allocator, .zig, "const x = @import(\"std\"); // hi");
@@ -707,4 +868,68 @@ test "tsx jsx tag highlighting keeps state across lines" {
     }
     try std.testing.expect(has_attr);
     try std.testing.expect(has_string);
+}
+
+test "bash heredoc keeps state until exact terminator" {
+    const allocator = std.testing.allocator;
+
+    const first = try highlightLineWithState(allocator, .bash, "cat <<EOF", emptyState());
+    defer allocator.free(first.spans);
+    try std.testing.expect(first.next_state.in_heredoc);
+    try std.testing.expect(hasTokenSpan(first.spans, .operator, 4, 6));
+    try std.testing.expect(hasTokenSpan(first.spans, .string, 6, 9));
+
+    const body = try highlightLineWithState(allocator, .bash, "value $USER", first.next_state);
+    defer allocator.free(body.spans);
+    try std.testing.expect(body.next_state.in_heredoc);
+    try std.testing.expect(hasTokenSpan(body.spans, .string, 0, "value $USER".len));
+
+    const end = try highlightLineWithState(allocator, .bash, "EOF", body.next_state);
+    defer allocator.free(end.spans);
+    try std.testing.expect(!end.next_state.in_heredoc);
+    try std.testing.expect(hasTokenSpan(end.spans, .string, 0, 3));
+}
+
+test "bash heredoc <<- closes on tab-indented terminator only" {
+    const allocator = std.testing.allocator;
+
+    const first = try highlightLineWithState(allocator, .bash, "cat <<-EOF", emptyState());
+    defer allocator.free(first.spans);
+    try std.testing.expect(first.next_state.in_heredoc);
+    try std.testing.expect(first.next_state.heredoc_strip_tabs);
+
+    const not_end = try highlightLineWithState(allocator, .bash, " EOF", first.next_state);
+    defer allocator.free(not_end.spans);
+    try std.testing.expect(not_end.next_state.in_heredoc);
+
+    const end = try highlightLineWithState(allocator, .bash, "\tEOF", not_end.next_state);
+    defer allocator.free(end.spans);
+    try std.testing.expect(!end.next_state.in_heredoc);
+}
+
+test "bash heredoc quoted delimiter tracks quoted mode and closes" {
+    const allocator = std.testing.allocator;
+
+    const first = try highlightLineWithState(allocator, .bash, "cat <<'TAG'", emptyState());
+    defer allocator.free(first.spans);
+    try std.testing.expect(first.next_state.in_heredoc);
+    try std.testing.expect(first.next_state.heredoc_quoted_delim);
+    try std.testing.expect(hasTokenSpan(first.spans, .string, 6, 11));
+
+    const not_end = try highlightLineWithState(allocator, .bash, "TAGx", first.next_state);
+    defer allocator.free(not_end.spans);
+    try std.testing.expect(not_end.next_state.in_heredoc);
+
+    const end = try highlightLineWithState(allocator, .bash, "TAG", not_end.next_state);
+    defer allocator.free(end.spans);
+    try std.testing.expect(!end.next_state.in_heredoc);
+}
+
+test "bash here-string does not enter heredoc mode" {
+    const allocator = std.testing.allocator;
+
+    const line = try highlightLineWithState(allocator, .bash, "echo <<< \"$x\"", emptyState());
+    defer allocator.free(line.spans);
+    try std.testing.expect(!line.next_state.in_heredoc);
+    try std.testing.expect(hasTokenSpan(line.spans, .operator, 5, 8));
 }
