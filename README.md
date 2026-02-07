@@ -212,33 +212,33 @@ Example:
 }
 ```
 
-`ui.perf_overlay`: show runtime overlay in status bar (`FPS avg/EMA` + `FT avg/p95`) (default `false`).
-`lsp.change_debounce_ms`: delay before flushing `didChange` (1..1000, default `32`).
-`lsp.did_save_debounce_ms`: debounce for TypeScript `didSave` pulse on typing (1..1000, default `64`).
-`lsp.completion.auto`: enable realtime completion trigger while typing (default `true`).
-`lsp.completion.debounce_ms`: delay before auto completion request (1..1000, default `48`).
-`lsp.completion.min_prefix_len`: minimum identifier length for letter-triggered completion (0..64, default `1`).
-`lsp.completion.trigger_on_dot`: trigger completion after `.` (default `true`).
-`lsp.completion.trigger_on_letters`: trigger completion while typing identifiers (default `true`).
-`lsp.hover.auto`: enable realtime hover request after idle (default `true`).
-`lsp.hover.debounce_ms`: idle delay before hover request (1..2000, default `140`).
-`lsp.hover.show_mode`: `tooltip | status` (default `tooltip`).
-`lsp.hover.hide_on_type`: hide hover tooltip when editing (default `true`).
-`lsp.ui.tooltip_max_width`: max tooltip width in columns (16..240, default `72`).
-`lsp.ui.tooltip_max_rows`: max tooltip height in rows (1..40, default `10`).
-`lsp.typescript.mode`: `auto | tsls | tsgo` (default `auto`).
-`lsp.typescript.command` + `args`: explicit TS LSP command override.
-`lsp.typescript.root_markers`: override project root detection markers for TS files.
-`lsp.zig.enabled`: optional legacy toggle for Zig LSP adapter (`true | false`).
-`lsp.zig.command` + `args`: optional legacy override for builtin Zig adapter command.
-`lsp.zig.root_markers`: optional legacy override for Zig root detection.
-`lsp.adapters`: ordered custom adapter list. If `name` matches builtin adapter (`zig-zls`, `typescript-tsgo`, `typescript-npx-tsgo`, `typescript-tsls`, `typescript-npx-tsls`, `bash-language-server`) it overrides it; otherwise adds a new adapter.
-`lsp.adapters[].language`: LSP `languageId` used in `didOpen`.
-`lsp.adapters[].priority`: candidate priority (`-1000..1000`), higher starts first.
-`lsp.adapters[].enabled`: disable/enable adapter without removing config.
-`lsp.adapters[].command` + `args`: server command for custom or overridden adapter.
-`lsp.adapters[].file_extensions`: file matching list (e.g. `[".ts",".tsx"]`) for custom adapters.
-`lsp.adapters[].root_markers`: optional root markers for custom/overridden adapter.
+- `ui.perf_overlay`: show runtime overlay in status bar (`FPS avg/EMA` + `FT avg/p95`) (default `false`).
+- `lsp.change_debounce_ms`: delay before flushing `didChange` (1..1000, default `32`).
+- `lsp.did_save_debounce_ms`: debounce for TypeScript `didSave` pulse on typing (1..1000, default `64`).
+- `lsp.completion.auto`: enable realtime completion trigger while typing (default `true`).
+- `lsp.completion.debounce_ms`: delay before auto completion request (1..1000, default `48`).
+- `lsp.completion.min_prefix_len`: minimum identifier length for letter-triggered completion (0..64, default `1`).
+- `lsp.completion.trigger_on_dot`: trigger completion after `.` (default `true`).
+- `lsp.completion.trigger_on_letters`: trigger completion while typing identifiers (default `true`).
+- `lsp.hover.auto`: enable realtime hover request after idle (default `true`).
+- `lsp.hover.debounce_ms`: idle delay before hover request (1..2000, default `140`).
+- `lsp.hover.show_mode`: `tooltip | status` (default `tooltip`).
+- `lsp.hover.hide_on_type`: hide hover tooltip when editing (default `true`).
+- `lsp.ui.tooltip_max_width`: max tooltip width in columns (16..240, default `72`).
+- `lsp.ui.tooltip_max_rows`: max tooltip height in rows (1..40, default `10`).
+- `lsp.typescript.mode`: `auto | tsls | tsgo` (default `auto`).
+- `lsp.typescript.command` + `args`: explicit TS LSP command override.
+- `lsp.typescript.root_markers`: override project root detection markers for TS files.
+- `lsp.zig.enabled`: optional legacy toggle for Zig LSP adapter (`true | false`).
+- `lsp.zig.command` + `args`: optional legacy override for builtin Zig adapter command.
+- `lsp.zig.root_markers`: optional legacy override for Zig root detection.
+- `lsp.adapters`: ordered custom adapter list. If `name` matches builtin adapter (`zig-zls`, `typescript-tsgo`, `typescript-npx-tsgo`, `typescript-tsls`, `typescript-npx-tsls`, `bash-language-server`) it overrides it; otherwise adds a new adapter.
+- `lsp.adapters[].language`: LSP `languageId` used in `didOpen`.
+- `lsp.adapters[].priority`: candidate priority (`-1000..1000`), higher starts first.
+- `lsp.adapters[].enabled`: disable/enable adapter without removing config.
+- `lsp.adapters[].command` + `args`: server command for custom or overridden adapter.
+- `lsp.adapters[].file_extensions`: file matching list (e.g. `[".ts",".tsx"]`) for custom adapters.
+- `lsp.adapters[].root_markers`: optional root markers for custom/overridden adapter.
 
 ## LSP setup
 
