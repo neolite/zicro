@@ -66,4 +66,29 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_unit_tests.step);
+
+    // GUI executable (macOS native)
+    const gui_mod = b.createModule(.{
+        .root_source_file = b.path("gui/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gui_mod.addImport("core", core_mod);
+
+    const gui_exe = b.addExecutable(.{
+        .name = "zicro-gui",
+        .root_module = gui_mod,
+    });
+    gui_exe.linkLibC();
+    gui_exe.linkFramework("Cocoa");
+    gui_exe.linkFramework("CoreGraphics");
+
+    b.installArtifact(gui_exe);
+
+    const run_gui_cmd = b.addRunArtifact(gui_exe);
+    if (b.args) |args| {
+        run_gui_cmd.addArgs(args);
+    }
+    const run_gui_step = b.step("run-gui", "Run zicro GUI demo");
+    run_gui_step.dependOn(&run_gui_cmd.step);
 }

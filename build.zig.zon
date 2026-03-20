@@ -12,6 +12,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "gui",
+        "core",
         "third_party",
     },
 }
