@@ -393,15 +393,15 @@ pub const Client = struct {
 
         const is_typescript = std.mem.eql(u8, language, "typescript");
         if (is_typescript) {
-            if (config.lsp_typescript.command) |command| {
+            if (config.typescript_command) |command| {
                 try candidates.append(.{
                     .name = "typescript-custom",
                     .language_id = "typescript",
                     .kind = .command,
                     .command = command,
-                    .args = config.lsp_typescript.args.items,
-                    .root_markers = if (config.lsp_typescript.root_markers.items.len > 0)
-                        config.lsp_typescript.root_markers.items
+                    .args = config.typescript_args,
+                    .root_markers = if (config.typescript_root_markers.len > 0)
+                        config.typescript_root_markers
                     else
                         language_roots,
                     .priority = 300,
@@ -412,8 +412,8 @@ pub const Client = struct {
                     if (!presets.matchesPath(preset, file_path)) continue;
                     if (!allowTypescriptPreset(config, preset.name)) continue;
 
-                    const roots = if (config.lsp_typescript.root_markers.items.len > 0)
-                        config.lsp_typescript.root_markers.items
+                    const roots = if (config.typescript_root_markers.len > 0)
+                        config.typescript_root_markers
                     else
                         preset.root_markers;
 
@@ -487,7 +487,7 @@ pub const Client = struct {
     ) void {
         _ = self;
 
-        if (config.lsp_zig.enabled) |enabled| {
+        if (config.zig_enabled) |enabled| {
             if (!enabled) {
                 removeLanguageCandidates(candidates, "zig");
                 return;
@@ -500,16 +500,16 @@ pub const Client = struct {
             if (!std.mem.eql(u8, candidate.language_id, "zig")) continue;
             if (!std.mem.eql(u8, candidate.name, "zig-zls")) continue;
 
-            if (config.lsp_zig.command) |command| {
+            if (config.zig_command) |command| {
                 candidate.command = command;
-                candidate.args = config.lsp_zig.args.items;
+                candidate.args = config.zig_args;
                 candidate.kind = .command;
-            } else if (config.lsp_zig.args.items.len > 0) {
-                candidate.args = config.lsp_zig.args.items;
+            } else if (config.zig_args.len > 0) {
+                candidate.args = config.zig_args;
             }
 
-            if (config.lsp_zig.root_markers.items.len > 0) {
-                candidate.root_markers = config.lsp_zig.root_markers.items;
+            if (config.zig_root_markers.len > 0) {
+                candidate.root_markers = config.zig_root_markers;
             }
         }
     }
@@ -538,12 +538,12 @@ pub const Client = struct {
                     candidate.kind = .command;
                     if (adapter.command) |command| {
                         candidate.command = command;
-                        candidate.args = adapter.args.items;
-                    } else if (adapter.args.items.len > 0) {
-                        candidate.args = adapter.args.items;
+                        candidate.args = adapter.args;
+                    } else if (adapter.args.len > 0) {
+                        candidate.args = adapter.args;
                     }
-                    if (adapter.root_markers.items.len > 0) {
-                        candidate.root_markers = adapter.root_markers.items;
+                    if (adapter.root_markers.len > 0) {
+                        candidate.root_markers = adapter.root_markers;
                     }
                     if (adapter.priority != 0) {
                         candidate.priority = adapter.priority;
@@ -554,10 +554,10 @@ pub const Client = struct {
             if (found) continue;
 
             if (!adapter.enabled) continue;
-            if (!adapterAppliesToExtension(adapter.file_extensions.items, adapter.language, ext)) continue;
+            if (!adapterAppliesToExtension(adapter.file_extensions, adapter.language, ext)) continue;
             const command = adapter.command orelse continue;
-            const root_markers = if (adapter.root_markers.items.len > 0)
-                adapter.root_markers.items
+            const root_markers = if (adapter.root_markers.len > 0)
+                adapter.root_markers
             else
                 (presets.rootMarkersForLanguage(adapter.language) orelse &fallback_root_markers);
 
@@ -566,7 +566,7 @@ pub const Client = struct {
                 .language_id = adapter.language,
                 .kind = .command,
                 .command = command,
-                .args = adapter.args.items,
+                .args = adapter.args,
                 .root_markers = root_markers,
                 .priority = if (adapter.priority != 0) adapter.priority else 90,
             });

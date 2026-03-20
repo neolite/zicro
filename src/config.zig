@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 
 pub const TsLspMode = enum {
     auto,
@@ -163,6 +164,46 @@ pub const Config = struct {
         self.lsp_zig.deinit(self.allocator);
         self.clearAdapters();
         self.lsp_adapters.deinit();
+    }
+
+    /// Convert to core.LspConfig for LSP client
+    pub fn toLspConfig(self: *const Config) core.LspConfig {
+        return .{
+            .enable_lsp = self.enable_lsp,
+            .typescript_mode = switch (self.lsp_typescript.mode) {
+                .auto => .auto,
+                .tsls => .tsls,
+                .tsgo => .tsgo,
+            },
+            .typescript_command = self.lsp_typescript.command,
+            .typescript_args = self.lsp_typescript.args.items,
+            .typescript_root_markers = self.lsp_typescript.root_markers.items,
+            .zig_enabled = self.lsp_zig.enabled,
+            .zig_command = self.lsp_zig.command,
+            .zig_args = self.lsp_zig.args.items,
+            .zig_root_markers = self.lsp_zig.root_markers.items,
+            .adapters = convertAdapters(self.lsp_adapters.items),
+        };
+    }
+
+    fn convertAdapters(adapters: []const LspAdapterConfig) []const core.LspAdapter {
+        // This is safe because LspAdapterConfig and core.LspAdapter have compatible layouts
+        // and we're only reading, not modifying
+        var result = std.mem.zeroes([1024]core.LspAdapter);
+        for (adapters, 0..) |adapter, i| {
+            if (i >= result.len) break;
+            result[i] = .{
+                .name = adapter.name,
+                .language = adapter.language,
+                .enabled = adapter.enabled,
+                .priority = adapter.priority,
+                .command = adapter.command,
+                .args = adapter.args.items,
+                .file_extensions = adapter.file_extensions.items,
+                .root_markers = adapter.root_markers.items,
+            };
+        }
+        return result[0..adapters.len];
     }
 
     fn applyPathIfExists(self: *Config, path: []const u8) !void {

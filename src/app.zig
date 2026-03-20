@@ -122,7 +122,7 @@ pub const App = struct {
         try app.setStatus("Ctrl+P files | Ctrl+Shift+P commands | Ctrl+W debug | Ctrl+S save | Ctrl+Q quit");
 
         if (config.enable_lsp and app.editor.file_path != null) {
-            app.lsp_state.client.startForFile(app.editor.file_path.?, config) catch |err| switch (err) {
+            app.lsp_state.client.startForFile(app.editor.file_path.?, &config.toLspConfig()) catch |err| switch (err) {
                 error.FileTooBig => try app.setStatus("LSP disabled: file too large for didOpen sync"),
                 error.LspServerUnavailable => try app.setStatus("LSP disabled: no matching adapter or server unavailable"),
                 else => try app.setStatus("LSP disabled: server not found or failed to spawn"),
@@ -1002,7 +1002,7 @@ pub const App = struct {
         self.resetLspUiState();
 
         if (self.config.enable_lsp and self.editor.file_path != null) {
-            self.lsp_state.client.startForFile(self.editor.file_path.?, self.config) catch {};
+            self.lsp_state.client.startForFile(self.editor.file_path.?, &self.config.toLspConfig()) catch {};
         }
 
         const elapsed = std.time.nanoTimestamp() - started_ns;
@@ -2344,7 +2344,7 @@ pub const App = struct {
             .redo => try self.executeCommand(.redo),
             .restart_lsp => {
                 if (self.editor.file_path) |path| {
-                    self.lsp_state.client.startForFile(path, self.config) catch |err| switch (err) {
+                    self.lsp_state.client.startForFile(path, &self.config.toLspConfig()) catch |err| switch (err) {
                         error.LspServerUnavailable => {
                             try self.setStatus("LSP restart failed: no matching adapter");
                             return;
