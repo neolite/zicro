@@ -18,9 +18,17 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
   - heredoc start forms `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`
   - multiline state tracking until exact terminator line
 - VSCode-style editing keys (`Ctrl+S`, `Ctrl+Q`, `Ctrl+Z`, `Ctrl+Y`, etc.).
-- Linear selection (`Shift+Arrows`) and block selection (`Option+Arrows`).
+- Linear selection (`Shift+Arrows`) and block selection (`Option+Shift+Arrows`).
 - Multi-cursor editing (`Ctrl+Shift+J/K` add caret, `Ctrl+Shift+M` clear).
 - VSCode-style `Alt/Option+Click` to add an extra cursor at click position.
+- Line editing parity with micro/VSCode workflows:
+  - duplicate current line/selection (`Ctrl+D`)
+  - move current line/selection up/down (`Option+Up/Down`)
+  - add next occurrence as extra cursor (`Cmd+D`)
+  - add all occurrences as extra cursors (`Cmd+Shift+L`)
+  - occurrence navigation from symbol/selection (`Ctrl+Shift+N/B` next/prev)
+- Pointer text selection (click-drag and shift-click) in terminal mouse mode.
+- Mouse wheel scrolling in editor/panels (`wheel up/down`) without moving logical cursor.
 - Clipboard copy/cut/paste (`Ctrl+C`, `Ctrl+K`, `Ctrl+V`) without line numbers.
 - Regex search prompt (`Ctrl+F`) with realtime preview.
 - In search prompt: `Down` = next match, `Up` = previous match.
@@ -30,7 +38,7 @@ Goal: replace `nano`/`micro` for daily coding with VSCode-like keybindings and p
   - realtime hover tooltip while idle after typing
   - manual completion (`Ctrl+N`)
   - manual hover (`Ctrl+T`)
-  - go-to-definition (`Ctrl+D`)
+  - go-to-definition (`Ctrl+Shift+D` / `Cmd+Shift+D`)
   - references panel (`Ctrl+R`)
   - cross-file jump for definition/references targets
   - jump-back (`Ctrl+O`) with file-aware jump stack
@@ -119,9 +127,14 @@ git push origin v0.2.0
 - `Ctrl+Y`: redo
 - `Ctrl+N`: LSP completion popup
 - `Ctrl+T`: LSP hover
-- `Ctrl+D`: LSP go-to-definition
+- `Ctrl+D`: duplicate current line/line selection
+- `Cmd+D`: add next occurrence as extra cursor (auto-selects symbol under cursor)
+- `Cmd+Shift+L`: add all occurrences as extra cursors
 - `Ctrl+R`: LSP references panel
 - `Ctrl+O`: jump back after LSP jump
+- `Ctrl+Shift+D` or `Cmd+Shift+D`: LSP go-to-definition
+- `Ctrl+Shift+N`: next occurrence
+- `Ctrl+Shift+B`: previous occurrence
 - `Ctrl+W`: toggle info/debug panel
 - `Ctrl+L`: toggle line numbers
 - `Ctrl+Shift+J`: add cursor on line below (same visual column)
@@ -130,8 +143,12 @@ git push origin v0.2.0
 - `Tab`: accept selected completion item when completion popup is open
 - Arrows/Home/End/PageUp/PageDown: navigation
 - `Shift+Arrows` + `Shift+Home/End/PageUp/PageDown`: linear selection
-- `Option+Arrows`: block selection
+- `Option+Up/Down`: move current line or selected lines
+- `Option+Shift+Arrows`: block selection
 - `Alt/Option+Click`: add extra cursor at clicked position
+- `Click + Drag`: linear selection with mouse
+- `Shift+Click`: extend current linear selection to clicked position
+- `Mouse wheel`: scroll viewport/panels (cursor stays on its logical position)
 - `Ctrl+Left/Right`: word navigation (if terminal sends modifier CSI)
 
 macOS aliases (native-style):
@@ -189,7 +206,7 @@ Example:
       "mode": "auto",
       "command": "npx",
       "args": ["tsgo", "--lsp", "-stdio"],
-      "root_markers": ["package.json", "tsconfig.json", ".git"]
+      "root_markers": ["turbo.json", "pnpm-workspace.yaml", "package.json", "tsconfig.json", ".git"]
     },
     "adapters": [
       {
@@ -228,7 +245,7 @@ Example:
 - `lsp.ui.tooltip_max_rows`: max tooltip height in rows (1..40, default `10`).
 - `lsp.typescript.mode`: `auto | tsls | tsgo` (default `auto`).
 - `lsp.typescript.command` + `args`: explicit TS LSP command override.
-- `lsp.typescript.root_markers`: override project root detection markers for TS files.
+- `lsp.typescript.root_markers`: override project root detection markers for TS files. Defaults prioritize monorepo roots (`turbo.json`, `pnpm-workspace.yaml`, etc.) before package-local markers.
 - `lsp.zig.enabled`: optional legacy toggle for Zig LSP adapter (`true | false`).
 - `lsp.zig.command` + `args`: optional legacy override for builtin Zig adapter command.
 - `lsp.zig.root_markers`: optional legacy override for Zig root detection.

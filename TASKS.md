@@ -89,6 +89,13 @@ Phase 5 notes:
 - [ ] Update README with config examples for tsgo/tsls and repo-local overrides.
 - [ ] Finalize macOS/Linux build and install verification checklist.
 
+Phase 6 notes:
+- 2026-02-07: Improved TS workspace root detection for monorepos by prioritizing workspace markers (`turbo.json`, `pnpm-workspace.yaml`, etc.) across the full parent chain.
+- 2026-02-07: Added terminal mouse wheel navigation for editor and list/prompt panels, plus regression tests for keyboard escape-sequence filtering and root resolution behavior.
+- 2026-02-12: Updated editor wheel behavior to viewport-only scrolling (no cursor movement); cursor is hidden when off-screen during detached scroll.
+- 2026-02-07: Added pointer-based linear selection support (click-drag and shift-click) and integrated it with existing selection semantics in editor mode.
+- 2026-02-12: Added editing-parity shortcuts (`Ctrl+D` duplicate line/selection, `Alt+Up/Down` move lines, `Cmd+D` add-next-occurrence cursor, `Cmd+Shift+L` add-all-occurrences cursor set with occurrence navigation helpers) and moved LSP definition to `Ctrl+Shift+D`/`Cmd+Shift+D` to avoid keybinding conflicts.
+
 ## Definition of Done
 - [ ] `zig fmt` passes for changed files.
 - [ ] `zig build` passes on Zig `0.15.2`.
