@@ -65,6 +65,9 @@ pub const App = struct {
     file_index: std.array_list.Managed([]u8),
     file_access_tick: u64,
     file_frecency: std.StringHashMap(FileFrecency),
+    pointer_select_active: bool,
+    pointer_select_anchor: usize,
+    follow_cursor: bool,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, file_path_opt: ?[]const u8) !App {
         const file_bytes = if (file_path_opt) |path|
@@ -106,6 +109,9 @@ pub const App = struct {
             .file_index = std.array_list.Managed([]u8).init(allocator),
             .file_access_tick = 0,
             .file_frecency = std.StringHashMap(FileFrecency).init(allocator),
+            .pointer_select_active = false,
+            .pointer_select_anchor = 0,
+            .follow_cursor = true,
         };
 
         try app.resetHighlightCache();
@@ -368,6 +374,21 @@ pub const App = struct {
             .alt_click => |click| {
                 self.addCursorAtScreenCell(click.row, click.col);
             },
+            .pointer_down => |pointer| {
+                self.handlePointerDown(pointer.row, pointer.col, pointer.shift);
+            },
+            .pointer_drag => |pointer| {
+                self.handlePointerDrag(pointer.row, pointer.col, pointer.shift);
+            },
+            .pointer_up => |pointer| {
+                self.handlePointerUp(pointer.row, pointer.col, pointer.shift);
+            },
+            .scroll_up => {
+                self.scrollViewportLines(-3);
+            },
+            .scroll_down => {
+                self.scrollViewportLines(3);
+            },
             else => {},
         }
     }
@@ -384,7 +405,15 @@ pub const App = struct {
                 if (self.ui.lsp_panel_selected > 0) self.ui.lsp_panel_selected -= 1;
                 return true;
             },
+            .scroll_up => {
+                if (self.ui.lsp_panel_selected > 0) self.ui.lsp_panel_selected -= 1;
+                return true;
+            },
             .down => {
+                self.ui.lsp_panel_selected += 1;
+                return true;
+            },
+            .scroll_down => {
                 self.ui.lsp_panel_selected += 1;
                 return true;
             },
@@ -399,7 +428,7 @@ pub const App = struct {
                 }
                 return false;
             },
-            .char, .text, .backspace, .delete => {
+            .char, .text, .backspace, .delete, .pointer_down, .pointer_drag, .pointer_up => {
                 self.closeLspPanel();
                 return false;
             },
@@ -989,6 +1018,8 @@ pub const App = struct {
             .insert_newline,
             .add_cursor_up,
             .add_cursor_down,
+            .add_cursor_next_occurrence,
+            .add_cursor_all_occurrences,
             .clear_multi_cursor,
             => false,
             else => true,
@@ -996,6 +1027,7 @@ pub const App = struct {
     }
 
     fn executeCommand(self: *App, command: Command) !void {
+        self.follow_cursor = true;
         switch (command) {
             .lsp_hover, .lsp_completion, .lsp_definition, .lsp_references, .lsp_jump_back => {},
             else => self.clearHoverTooltip(),
@@ -1010,6 +1042,9 @@ pub const App = struct {
             .copy => try self.copySelectionToClipboard(),
             .cut => try self.cutSelectionToClipboard(),
             .paste => try self.pasteFromClipboard(),
+            .duplicate_line => try self.duplicateLineOrSelection(),
+            .move_line_up => try self.moveSelectedLines(-1),
+            .move_line_down => try self.moveSelectedLines(1),
             .goto_line => {
                 self.closeLspPanel();
                 self.ui.prompt.open(.goto_line);
@@ -1237,6 +1272,10 @@ pub const App = struct {
             .lsp_definition => try self.requestDefinition(),
             .lsp_references => try self.requestReferences(),
             .lsp_jump_back => try self.jumpBack(),
+            .add_cursor_next_occurrence => try self.addNextOccurrenceCursor(),
+            .add_cursor_all_occurrences => try self.addAllOccurrenceCursors(),
+            .occurrence_next => try self.jumpOccurrence(true),
+            .occurrence_prev => try self.jumpOccurrence(false),
             .toggle_debug_panel => {
                 self.ui.debug_panel_enabled = !self.ui.debug_panel_enabled;
                 if (self.ui.debug_panel_enabled) {
@@ -1296,13 +1335,17 @@ pub const App = struct {
     }
 
     fn discoverProjectRoot(self: *App) ![]u8 {
+        const has_open_file = self.editor.file_path != null;
         const start_path = if (self.editor.file_path) |path|
             try std.fs.realpathAlloc(self.allocator, path)
         else
             try std.fs.cwd().realpathAlloc(self.allocator, ".");
         defer self.allocator.free(start_path);
 
-        const start_dir = std.fs.path.dirname(start_path) orelse start_path;
+        const start_dir = if (has_open_file)
+            (std.fs.path.dirname(start_path) orelse start_path)
+        else
+            start_path;
         const fallback_dir = try self.allocator.dupe(u8, start_dir);
         errdefer self.allocator.free(fallback_dir);
 
@@ -1473,7 +1516,13 @@ pub const App = struct {
             .up => {
                 if (self.ui.palette.selected > 0) self.ui.palette.selected -= 1;
             },
+            .scroll_up => {
+                if (self.ui.palette.selected > 0) self.ui.palette.selected -= 1;
+            },
             .down => {
+                self.ui.palette.selected += 1;
+            },
+            .scroll_down => {
                 self.ui.palette.selected += 1;
             },
             .enter => {
@@ -1559,7 +1608,15 @@ pub const App = struct {
                 .project_search => try self.projectSearchPrevFromPrompt(),
                 else => try self.regexPrevFromPrompt(),
             },
+            .scroll_up => switch (self.ui.prompt.mode) {
+                .project_search => try self.projectSearchPrevFromPrompt(),
+                else => try self.regexPrevFromPrompt(),
+            },
             .down => switch (self.ui.prompt.mode) {
+                .project_search => try self.projectSearchNextFromPrompt(),
+                else => try self.regexNextFromPrompt(),
+            },
+            .scroll_down => switch (self.ui.prompt.mode) {
                 .project_search => try self.projectSearchNextFromPrompt(),
                 else => try self.regexNextFromPrompt(),
             },
@@ -1939,6 +1996,7 @@ pub const App = struct {
     }
 
     fn centerCursorInViewport(self: *App) void {
+        self.follow_cursor = true;
         const text_rows = self.editorTextRows();
         const line_count = self.editor.buffer.lineCount();
         if (line_count <= text_rows) {
@@ -1951,6 +2009,22 @@ pub const App = struct {
         const desired_top = if (line > half) line - half else 0;
         const max_top = line_count - text_rows;
         self.editor.scroll_y = @min(desired_top, max_top);
+    }
+
+    fn scrollViewportLines(self: *App, delta_lines: i32) void {
+        const text_rows = self.editorTextRows();
+        const line_count = self.editor.buffer.lineCount();
+        if (line_count <= text_rows) {
+            self.editor.scroll_y = 0;
+            self.follow_cursor = false;
+            return;
+        }
+
+        const max_top = line_count - text_rows;
+        const current: i64 = @intCast(self.editor.scroll_y);
+        const next = std.math.clamp(current + @as(i64, delta_lines), 0, @as(i64, @intCast(max_top)));
+        self.editor.scroll_y = @intCast(next);
+        self.follow_cursor = false;
     }
 
     fn findRegexForward(self: *App, pattern: []const u8, start_offset_input: usize) !?SearchMatch {
@@ -2318,6 +2392,7 @@ pub const App = struct {
     }
 
     fn markBufferEdited(self: *App) void {
+        self.follow_cursor = true;
         self.editor.dirty = true;
         self.editor.confirm_quit = false;
         self.editor.search_match = null;
@@ -2584,6 +2659,7 @@ pub const App = struct {
 
     fn addCursorAtOffset(self: *App, target_input: usize) void {
         self.clearSelection();
+        self.follow_cursor = true;
 
         const target = @min(target_input, self.editor.buffer.len());
         if (target == self.editor.cursor) return;
@@ -2594,21 +2670,77 @@ pub const App = struct {
         self.normalizeExtraCursors();
     }
 
-    fn addCursorAtScreenCell(self: *App, row: usize, col: usize) void {
-        if (row < top_bar_rows) return;
+    fn screenCellToBufferOffset(self: *const App, row: usize, col: usize) ?usize {
+        if (row < top_bar_rows) return null;
 
         const text_rows = self.editorTextRows();
-        if (text_rows == 0) return;
+        if (text_rows == 0) return null;
 
         const text_row = row - top_bar_rows;
-        if (text_row >= text_rows) return;
+        if (text_row >= text_rows) return null;
 
         const line_index = self.editor.scroll_y + text_row;
-        if (line_index >= self.editor.buffer.lineCount()) return;
+        if (line_index >= self.editor.buffer.lineCount()) return null;
 
         const visual_col = col -| line_gutter_cols;
-        const target = self.editor.buffer.offsetFromLineVisualCol(line_index, visual_col, terminal_tab_width);
+        return self.editor.buffer.offsetFromLineVisualCol(line_index, visual_col, terminal_tab_width);
+    }
+
+    fn addCursorAtScreenCell(self: *App, row: usize, col: usize) void {
+        const target = self.screenCellToBufferOffset(row, col) orelse return;
         self.addCursorAtOffset(target);
+    }
+
+    fn handlePointerDown(self: *App, row: usize, col: usize, shift: bool) void {
+        const target = self.screenCellToBufferOffset(row, col) orelse return;
+        self.follow_cursor = true;
+
+        self.pointer_select_active = true;
+        self.pointer_select_anchor = if (shift and self.editor.selection_mode == .linear and self.editor.selection_anchor != null)
+            self.editor.selection_anchor.?
+        else
+            target;
+
+        if (!shift) {
+            self.clearExtraCursors();
+            self.clearSelection();
+        } else {
+            self.clearExtraCursors();
+            self.editor.selection_mode = .linear;
+            if (self.editor.selection_anchor == null) {
+                self.editor.selection_anchor = self.pointer_select_anchor;
+            }
+        }
+
+        self.editor.cursor = target;
+        self.editor.preferred_visual_col = self.editor.buffer.visualColumnFromOffset(target, terminal_tab_width);
+    }
+
+    fn handlePointerDrag(self: *App, row: usize, col: usize, shift: bool) void {
+        _ = shift;
+        if (!self.pointer_select_active) return;
+
+        const target = self.screenCellToBufferOffset(row, col) orelse return;
+        self.clearExtraCursors();
+        self.editor.selection_mode = .linear;
+        self.editor.selection_anchor = self.pointer_select_anchor;
+        self.editor.cursor = target;
+        self.editor.preferred_visual_col = self.editor.buffer.visualColumnFromOffset(target, terminal_tab_width);
+    }
+
+    fn handlePointerUp(self: *App, row: usize, col: usize, shift: bool) void {
+        _ = shift;
+        self.pointer_select_active = false;
+
+        // Finalize position on release for click+release without drag motion events.
+        const target = self.screenCellToBufferOffset(row, col) orelse return;
+        if (self.editor.selection_anchor == null) {
+            self.editor.cursor = target;
+            self.editor.preferred_visual_col = self.editor.buffer.visualColumnFromOffset(target, terminal_tab_width);
+        } else if (self.editor.selection_mode == .linear) {
+            self.editor.cursor = target;
+            self.editor.preferred_visual_col = self.editor.buffer.visualColumnFromOffset(target, terminal_tab_width);
+        }
     }
 
     fn beginSelection(self: *App) void {
@@ -2658,6 +2790,313 @@ pub const App = struct {
         const end_offset = @max(anchor, self.editor.cursor) - 1;
         const end_line = self.editor.buffer.lineColFromOffset(end_offset).line;
         return .{ .start = start_line, .end = end_line };
+    }
+
+    const LineOffsets = struct {
+        start: usize,
+        end: usize,
+    };
+
+    fn lineOffsets(self: *const App, start_line_input: usize, end_line_input: usize) LineOffsets {
+        const line_count = self.editor.buffer.lineCount();
+        const start_line = @min(start_line_input, line_count - 1);
+        const end_line = @min(end_line_input, line_count - 1);
+        const start = self.editor.buffer.offsetFromLineCol(start_line, 0);
+        const end = if (end_line + 1 < line_count)
+            self.editor.buffer.offsetFromLineCol(end_line + 1, 0)
+        else
+            self.editor.buffer.len();
+        return .{ .start = start, .end = end };
+    }
+
+    fn duplicateLineOrSelection(self: *App) !void {
+        if (self.hasBlockSelection()) {
+            try self.setStatus("Duplicate: block selection not supported");
+            return;
+        }
+
+        const cursor_pos = self.editor.buffer.lineColFromOffset(self.editor.cursor);
+        const lines = self.selectedLineRange();
+        const offsets = self.lineOffsets(lines.start, lines.end);
+        if (offsets.end <= offsets.start) return;
+
+        const line_delta = (lines.end - lines.start) + 1;
+        const bytes = try self.editor.buffer.toOwnedBytes(self.allocator);
+        defer self.allocator.free(bytes);
+
+        const chunk = bytes[offsets.start..offsets.end];
+        try self.queueIncrementalChange(offsets.end, offsets.end, chunk);
+        try self.editor.buffer.insert(offsets.end, chunk);
+
+        const new_line = @min(cursor_pos.line + line_delta, self.editor.buffer.lineCount() - 1);
+        self.editor.cursor = self.editor.buffer.offsetFromLineCol(new_line, cursor_pos.col);
+        self.clearSelection();
+        self.editor.preferred_visual_col = null;
+        self.markBufferEdited();
+    }
+
+    fn moveSelectedLines(self: *App, delta: i32) !void {
+        if (delta == 0) return;
+        if (self.hasBlockSelection()) {
+            try self.setStatus("Move line: block selection not supported");
+            return;
+        }
+
+        const line_count = self.editor.buffer.lineCount();
+        if (line_count <= 1) return;
+
+        const lines = self.selectedLineRange();
+        if (delta < 0 and lines.start == 0) {
+            try self.setStatus("Move line: already at top");
+            return;
+        }
+        if (delta > 0 and lines.end + 1 >= line_count) {
+            try self.setStatus("Move line: already at bottom");
+            return;
+        }
+
+        const cursor_pos = self.editor.buffer.lineColFromOffset(self.editor.cursor);
+        const anchor_pos = if (self.editor.selection_anchor) |anchor|
+            self.editor.buffer.lineColFromOffset(anchor)
+        else
+            null;
+
+        const bytes = try self.editor.buffer.toOwnedBytes(self.allocator);
+        defer self.allocator.free(bytes);
+
+        const block = self.lineOffsets(lines.start, lines.end);
+        var rewritten = std.array_list.Managed(u8).init(self.allocator);
+        defer rewritten.deinit();
+
+        if (delta < 0) {
+            const prev = self.lineOffsets(lines.start - 1, lines.start - 1);
+            try rewritten.appendSlice(bytes[0..prev.start]);
+            try rewritten.appendSlice(bytes[block.start..block.end]);
+            try rewritten.appendSlice(bytes[prev.start..block.start]);
+            try rewritten.appendSlice(bytes[block.end..]);
+        } else {
+            const next = self.lineOffsets(lines.end + 1, lines.end + 1);
+            try rewritten.appendSlice(bytes[0..block.start]);
+            try rewritten.appendSlice(bytes[block.end..next.end]);
+            try rewritten.appendSlice(bytes[block.start..block.end]);
+            try rewritten.appendSlice(bytes[next.end..]);
+        }
+
+        try self.queueIncrementalChange(0, self.editor.buffer.len(), rewritten.items);
+        try self.editor.buffer.delete(0, self.editor.buffer.len());
+        try self.editor.buffer.insert(0, rewritten.items);
+
+        const shift: i64 = if (delta < 0) -1 else 1;
+        const max_line_i64: i64 = @intCast(self.editor.buffer.lineCount() - 1);
+
+        const cursor_line_i64 = std.math.clamp(@as(i64, @intCast(cursor_pos.line)) + shift, @as(i64, 0), max_line_i64);
+        const cursor_line: usize = @intCast(cursor_line_i64);
+        self.editor.cursor = self.editor.buffer.offsetFromLineCol(cursor_line, cursor_pos.col);
+
+        if (anchor_pos) |pos| {
+            const anchor_line_i64 = std.math.clamp(@as(i64, @intCast(pos.line)) + shift, @as(i64, 0), max_line_i64);
+            const anchor_line: usize = @intCast(anchor_line_i64);
+            self.editor.selection_mode = .linear;
+            self.editor.selection_anchor = self.editor.buffer.offsetFromLineCol(anchor_line, pos.col);
+        } else {
+            self.clearSelection();
+        }
+
+        self.editor.preferred_visual_col = null;
+        self.markBufferEditedForceFullSync();
+    }
+
+    fn jumpOccurrence(self: *App, forward: bool) !void {
+        const selected = try self.ensureOccurrenceSelection() orelse return;
+
+        const all = try self.editor.buffer.toOwnedBytes(self.allocator);
+        defer self.allocator.free(all);
+
+        const needle = all[selected.start..selected.end];
+        if (needle.len == 0) return;
+
+        const next_start = if (forward)
+            findNextOccurrence(all, needle, selected.end, selected.start)
+        else
+            findPrevOccurrence(all, needle, selected.start, selected.start);
+        const match_start = next_start orelse {
+            try self.setStatus("Occurrence: no more matches");
+            return;
+        };
+
+        self.editor.selection_mode = .linear;
+        self.editor.selection_anchor = match_start;
+        self.editor.cursor = match_start + needle.len;
+        self.editor.preferred_visual_col = null;
+        self.centerCursorInViewport();
+
+        if (forward) {
+            try self.setStatus("Occurrence: next");
+        } else {
+            try self.setStatus("Occurrence: previous");
+        }
+    }
+
+    fn addNextOccurrenceCursor(self: *App) !void {
+        const selected = try self.ensureOccurrenceSelection() orelse return;
+
+        const all = try self.editor.buffer.toOwnedBytes(self.allocator);
+        defer self.allocator.free(all);
+
+        const needle = all[selected.start..selected.end];
+        if (needle.len == 0) return;
+
+        var occurrences = std.array_list.Managed(usize).init(self.allocator);
+        defer occurrences.deinit();
+
+        const word_only = isIdentifierNeedle(needle);
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, all, pos, needle)) |start| {
+            if (!word_only or isIdentifierBoundary(all, start, needle.len)) {
+                try occurrences.append(start);
+            }
+            pos = start + needle.len;
+        }
+
+        if (occurrences.items.len == 0) {
+            try self.setStatus("Occurrence: not found");
+            return;
+        }
+
+        const cursor_offsets = try self.allCursorOffsetsOwned(self.allocator);
+        defer self.allocator.free(cursor_offsets);
+
+        var current_index: ?usize = null;
+        for (occurrences.items, 0..) |start, index| {
+            if (start == selected.start) {
+                current_index = index;
+                break;
+            }
+        }
+        if (current_index == null) current_index = 0;
+
+        var step: usize = 1;
+        while (step <= occurrences.items.len) : (step += 1) {
+            const index = (current_index.? + step) % occurrences.items.len;
+            const start = occurrences.items[index];
+            const end = start + needle.len;
+            if (containsOffset(cursor_offsets, end)) continue;
+
+            self.addCursorAtOffset(end);
+            self.centerCursorInViewport();
+            try self.setStatus("Multi-cursor: next occurrence");
+            return;
+        }
+
+        try self.setStatus("Occurrence: all matches already selected");
+    }
+
+    fn addAllOccurrenceCursors(self: *App) !void {
+        const selected = try self.ensureOccurrenceSelection() orelse return;
+
+        const all = try self.editor.buffer.toOwnedBytes(self.allocator);
+        defer self.allocator.free(all);
+
+        const needle = all[selected.start..selected.end];
+        if (needle.len == 0) return;
+
+        var occurrences = std.array_list.Managed(usize).init(self.allocator);
+        defer occurrences.deinit();
+
+        const word_only = isIdentifierNeedle(needle);
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, all, pos, needle)) |start| {
+            if (!word_only or isIdentifierBoundary(all, start, needle.len)) {
+                try occurrences.append(start);
+            }
+            pos = start + needle.len;
+        }
+
+        if (occurrences.items.len <= 1) {
+            try self.setStatus("Occurrence: single match");
+            return;
+        }
+
+        self.extra_cursors.clearRetainingCapacity();
+        self.editor.cursor = selected.end;
+        for (occurrences.items) |start| {
+            const end = start + needle.len;
+            if (end == self.editor.cursor) continue;
+            try self.extra_cursors.append(end);
+        }
+        self.normalizeExtraCursors();
+        self.centerCursorInViewport();
+        var msg: [80]u8 = undefined;
+        const text = try std.fmt.bufPrint(&msg, "Multi-cursor: selected {d} occurrences", .{occurrences.items.len});
+        try self.setStatus(text);
+    }
+
+    fn ensureOccurrenceSelection(self: *App) !?ByteRange {
+        if (self.selectedRange()) |range| {
+            const same_line = self.editor.buffer.lineColFromOffset(range.start).line == self.editor.buffer.lineColFromOffset(range.end - 1).line;
+            if (!same_line) {
+                try self.setStatus("Occurrence: select text on a single line");
+                return null;
+            }
+            if (range.end > range.start and (range.end - range.start) <= 256) {
+                return range;
+            }
+            try self.setStatus("Occurrence: selection too large");
+            return null;
+        }
+
+        const ident = self.identifierRangeAtCursor() orelse {
+            try self.setStatus("Occurrence: place cursor on a symbol");
+            return null;
+        };
+        self.editor.selection_mode = .linear;
+        self.editor.selection_anchor = ident.start;
+        self.editor.cursor = ident.end;
+        return ident;
+    }
+
+    fn identifierRangeAtCursor(self: *const App) ?ByteRange {
+        const len = self.editor.buffer.len();
+        if (len == 0) return null;
+
+        var probe = @min(self.editor.cursor, len);
+        if (probe == len and probe > 0) {
+            probe = self.editor.buffer.prevCodepointStart(probe);
+        }
+
+        if (probe < len) {
+            const ch = self.editor.buffer.byteAt(probe) orelse return null;
+            if (!isIdentifierByte(ch) and probe > 0) {
+                const prev = self.editor.buffer.prevCodepointStart(probe);
+                if (prev < probe) {
+                    const prev_ch = self.editor.buffer.byteAt(prev) orelse return null;
+                    if (isIdentifierByte(prev_ch)) probe = prev;
+                }
+            }
+        }
+
+        const head = self.editor.buffer.byteAt(probe) orelse return null;
+        if (!isIdentifierByte(head)) return null;
+
+        var start = probe;
+        while (start > 0) {
+            const prev = self.editor.buffer.prevCodepointStart(start);
+            if (prev >= start or start - prev != 1) break;
+            const ch = self.editor.buffer.byteAt(prev) orelse break;
+            if (!isIdentifierByte(ch)) break;
+            start = prev;
+        }
+
+        var end = self.editor.buffer.nextCodepointEnd(probe);
+        while (end < len) {
+            const next_end = self.editor.buffer.nextCodepointEnd(end);
+            if (next_end <= end or next_end - end != 1) break;
+            const ch = self.editor.buffer.byteAt(end) orelse break;
+            if (!isIdentifierByte(ch)) break;
+            end = next_end;
+        }
+
+        return .{ .start = start, .end = end };
     }
 
     fn hasBlockSelection(self: *const App) bool {
@@ -2960,6 +3399,79 @@ fn isIdentifierByte(ch: u8) bool {
     return std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch) or ch == '_';
 }
 
+fn isIdentifierNeedle(needle: []const u8) bool {
+    if (needle.len == 0) return false;
+    for (needle) |ch| {
+        if (!isIdentifierByte(ch)) return false;
+    }
+    return true;
+}
+
+fn isIdentifierBoundary(haystack: []const u8, start: usize, needle_len: usize) bool {
+    if (start > 0 and isIdentifierByte(haystack[start - 1])) return false;
+    const end = start + needle_len;
+    if (end < haystack.len and isIdentifierByte(haystack[end])) return false;
+    return true;
+}
+
+fn containsOffset(offsets: []const usize, target: usize) bool {
+    for (offsets) |offset| {
+        if (offset == target) return true;
+    }
+    return false;
+}
+
+fn findNextOccurrence(haystack: []const u8, needle: []const u8, from_offset: usize, skip_start: usize) ?usize {
+    if (needle.len == 0 or haystack.len < needle.len) return null;
+
+    const bounded_from = @min(from_offset, haystack.len);
+    const word_only = isIdentifierNeedle(needle);
+
+    var pos = bounded_from;
+    while (pos + needle.len <= haystack.len) : (pos += 1) {
+        if (!std.mem.eql(u8, haystack[pos .. pos + needle.len], needle)) continue;
+        if (pos == skip_start) continue;
+        if (word_only and !isIdentifierBoundary(haystack, pos, needle.len)) continue;
+        return pos;
+    }
+
+    pos = 0;
+    while (pos + needle.len <= bounded_from) : (pos += 1) {
+        if (!std.mem.eql(u8, haystack[pos .. pos + needle.len], needle)) continue;
+        if (pos == skip_start) continue;
+        if (word_only and !isIdentifierBoundary(haystack, pos, needle.len)) continue;
+        return pos;
+    }
+
+    return null;
+}
+
+fn findPrevOccurrence(haystack: []const u8, needle: []const u8, from_offset: usize, skip_start: usize) ?usize {
+    if (needle.len == 0 or haystack.len < needle.len) return null;
+
+    const bounded_from = @min(from_offset, haystack.len);
+    const word_only = isIdentifierNeedle(needle);
+
+    var best: ?usize = null;
+    var pos: usize = 0;
+    while (pos + needle.len <= bounded_from) : (pos += 1) {
+        if (!std.mem.eql(u8, haystack[pos .. pos + needle.len], needle)) continue;
+        if (pos == skip_start) continue;
+        if (word_only and !isIdentifierBoundary(haystack, pos, needle.len)) continue;
+        best = pos;
+    }
+    if (best) |found| return found;
+
+    pos = bounded_from;
+    while (pos + needle.len <= haystack.len) : (pos += 1) {
+        if (!std.mem.eql(u8, haystack[pos .. pos + needle.len], needle)) continue;
+        if (pos == skip_start) continue;
+        if (word_only and !isIdentifierBoundary(haystack, pos, needle.len)) continue;
+        best = pos;
+    }
+    return best;
+}
+
 fn completionSuffix(insert_text: []const u8, typed_prefix: []const u8) ?[]const u8 {
     if (typed_prefix.len == 0) return null;
     if (!std.mem.startsWith(u8, insert_text, typed_prefix)) return null;
@@ -3124,4 +3636,32 @@ test "file URI decode handles percent escapes" {
     defer allocator.free(path);
 
     try std.testing.expectEqualStrings("/tmp/hello world.ts", path);
+}
+
+test "occurrence search wraps forward and backward" {
+    const text = "foo bar foo baz";
+    const needle = "foo";
+
+    const first = findNextOccurrence(text, needle, 0, std.math.maxInt(usize)).?;
+    try std.testing.expectEqual(@as(usize, 0), first);
+
+    const second = findNextOccurrence(text, needle, first + needle.len, first).?;
+    try std.testing.expectEqual(@as(usize, 8), second);
+
+    const wrapped = findNextOccurrence(text, needle, text.len, second).?;
+    try std.testing.expectEqual(@as(usize, 0), wrapped);
+
+    const prev = findPrevOccurrence(text, needle, second, second).?;
+    try std.testing.expectEqual(@as(usize, 0), prev);
+}
+
+test "occurrence search respects identifier boundaries" {
+    const text = "Counter Encounter Counter";
+    const needle = "Counter";
+
+    const first = findNextOccurrence(text, needle, 0, std.math.maxInt(usize)).?;
+    try std.testing.expectEqual(@as(usize, 0), first);
+
+    const second = findNextOccurrence(text, needle, first + needle.len, first).?;
+    try std.testing.expectEqual(@as(usize, 18), second);
 }

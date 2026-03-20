@@ -19,7 +19,18 @@ const npx_tsgo_args = [_][]const u8{ "tsgo", "--lsp", "-stdio" };
 const tsls_args = [_][]const u8{"--stdio"};
 const npx_tsls_args = [_][]const u8{ "typescript-language-server", "--stdio" };
 const ts_ext = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts" };
-const ts_roots = [_][]const u8{ "package.json", "tsconfig.json", "jsconfig.json", ".git" };
+const ts_roots = [_][]const u8{
+    "turbo.json",
+    "pnpm-workspace.yaml",
+    "pnpm-workspace.yml",
+    "nx.json",
+    "lerna.json",
+    "rush.json",
+    "package.json",
+    "tsconfig.json",
+    "jsconfig.json",
+    ".git",
+};
 
 const bash_args = [_][]const u8{"start"};
 const bash_ext = [_][]const u8{ ".sh", ".bash" };

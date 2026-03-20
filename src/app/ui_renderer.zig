@@ -17,7 +17,9 @@ pub fn render(
     var out = std.array_list.Managed(u8).init(frame_allocator);
 
     const text_rows = self.editorTextRows();
-    self.adjustScroll(text_rows);
+    if (self.follow_cursor) {
+        self.adjustScroll(text_rows);
+    }
 
     try out.appendSlice("\x1b[?25l\x1b[H");
     try renderDiagnosticsBar(self, &out, frame_allocator, terminal_tab_width);
@@ -59,6 +61,7 @@ pub fn render(
         try renderDebugPanel(self, &out, top_bar_rows, terminal_tab_width);
     }
 
+    var show_cursor = false;
     if (self.ui.palette.active) {
         try renderPalette(self, &out, frame_allocator);
         const palette_layout = computePaletteLayout(self);
@@ -67,19 +70,26 @@ pub fn render(
         const label_width = displayWidth(label, terminal_tab_width);
         const cursor_col = @min(palette_layout.col + 1 + label_width + query_col, self.terminal.width);
         try out.writer().print("\x1b[{d};{d}H", .{ palette_layout.row + 1, cursor_col });
+        show_cursor = true;
     } else if (self.ui.prompt.active) {
         const label = promptLabel(self.ui.prompt.mode);
         const cursor_col = @min(displayWidth(label, terminal_tab_width) + displayWidth(self.ui.prompt.query.items, terminal_tab_width) + 2, self.terminal.width);
         try out.writer().print("\x1b[{d};{d}H", .{ 2, cursor_col });
+        show_cursor = true;
     } else {
         const pos = self.editor.buffer.lineColFromOffset(self.editor.cursor);
-        const screen_row = top_bar_rows + (pos.line - self.editor.scroll_y) + 1;
-        const visual_col = self.editor.buffer.visualColumnFromOffset(self.editor.cursor, terminal_tab_width);
-        const screen_col = @min(visual_col + line_gutter_cols + 1, self.terminal.width);
-        try out.writer().print("\x1b[{d};{d}H", .{ screen_row, screen_col });
+        if (pos.line >= self.editor.scroll_y and pos.line < self.editor.scroll_y + text_rows) {
+            const screen_row = top_bar_rows + (pos.line - self.editor.scroll_y) + 1;
+            const visual_col = self.editor.buffer.visualColumnFromOffset(self.editor.cursor, terminal_tab_width);
+            const screen_col = @min(visual_col + line_gutter_cols + 1, self.terminal.width);
+            try out.writer().print("\x1b[{d};{d}H", .{ screen_row, screen_col });
+            show_cursor = true;
+        }
     }
 
-    try out.appendSlice("\x1b[?25h");
+    if (show_cursor) {
+        try out.appendSlice("\x1b[?25h");
+    }
     try self.terminal.writeAll(out.items);
     try self.terminal.flush();
 }
@@ -389,7 +399,7 @@ pub fn selectionOccurrencesOnLineOwned(
     }
 
     const needle = selected_line[selection_start_in_line..selection_end_in_line];
-    if (needle.len == 0 or std.mem.indexOfAny(u8, needle, " \t\r\n") != null) {
+    if (needle.len == 0 or std.mem.indexOfAny(u8, needle, "\r\n") != null) {
         return allocator.alloc(ByteRange, 0);
     }
 

@@ -2609,24 +2609,101 @@ fn toFileUri(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn findRootDir(allocator: std.mem.Allocator, abs_file: []const u8, markers: []const []const u8) ![]u8 {
     const start_dir = std.fs.path.dirname(abs_file) orelse return allocator.dupe(u8, ".");
+    if (markers.len == 0) return allocator.dupe(u8, start_dir);
+
+    var found_by_marker = try allocator.alloc(?[]u8, markers.len);
+    defer allocator.free(found_by_marker);
+    errdefer {
+        for (found_by_marker) |entry| {
+            if (entry) |path| allocator.free(path);
+        }
+    }
+    @memset(found_by_marker, null);
 
     var current = try allocator.dupe(u8, start_dir);
+    defer allocator.free(current);
 
     while (true) {
-        for (markers) |marker| {
-            const candidate = try std.fs.path.join(allocator, &.{ current, marker });
-            defer allocator.free(candidate);
-
-            if (std.fs.cwd().access(candidate, .{})) |_| {
-                return current;
-            } else |_| {}
+        for (markers, 0..) |marker, marker_index| {
+            if (found_by_marker[marker_index] != null) continue;
+            if (try markerExistsInDir(allocator, current, marker)) {
+                found_by_marker[marker_index] = try allocator.dupe(u8, current);
+            }
         }
 
-        const parent = std.fs.path.dirname(current) orelse return current;
-        if (std.mem.eql(u8, parent, current)) return current;
+        const parent = std.fs.path.dirname(current) orelse break;
+        if (std.mem.eql(u8, parent, current)) break;
 
         const next = try allocator.dupe(u8, parent);
         allocator.free(current);
         current = next;
     }
+
+    for (found_by_marker, 0..) |found, found_index| {
+        if (found) |path| {
+            for (found_by_marker, 0..) |other, other_index| {
+                if (other_index == found_index) continue;
+                if (other) |other_path| allocator.free(other_path);
+            }
+            return path;
+        }
+    }
+
+    return allocator.dupe(u8, start_dir);
+}
+
+fn markerExistsInDir(allocator: std.mem.Allocator, dir_path: []const u8, marker: []const u8) !bool {
+    const candidate = try std.fs.path.join(allocator, &.{ dir_path, marker });
+    defer allocator.free(candidate);
+
+    if (std.fs.cwd().access(candidate, .{})) |_| {
+        return true;
+    } else |_| {
+        return false;
+    }
+}
+
+test "findRootDir prefers monorepo markers when listed before package markers" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("repo/apps/web/src");
+    try tmp.dir.writeFile(.{ .sub_path = "repo/turbo.json", .data = "{}" });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/package.json", .data = "{}" });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/apps/web/package.json", .data = "{}" });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/apps/web/src/index.ts", .data = "export const v = 1;\n" });
+
+    const abs_file = try tmp.dir.realpathAlloc(allocator, "repo/apps/web/src/index.ts");
+    defer allocator.free(abs_file);
+
+    const root = try findRootDir(allocator, abs_file, &[_][]const u8{ "turbo.json", "package.json", ".git" });
+    defer allocator.free(root);
+
+    const expected = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, root);
+}
+
+test "findRootDir falls back to nearest package marker when no monorepo marker exists" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("repo/apps/web/src");
+    try tmp.dir.writeFile(.{ .sub_path = "repo/package.json", .data = "{}" });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/apps/web/package.json", .data = "{}" });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/apps/web/src/index.ts", .data = "export const v = 1;\n" });
+
+    const abs_file = try tmp.dir.realpathAlloc(allocator, "repo/apps/web/src/index.ts");
+    defer allocator.free(abs_file);
+
+    const root = try findRootDir(allocator, abs_file, &[_][]const u8{ "turbo.json", "package.json", ".git" });
+    defer allocator.free(root);
+
+    const expected = try tmp.dir.realpathAlloc(allocator, "repo/apps/web");
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, root);
 }

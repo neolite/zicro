@@ -13,6 +13,9 @@ pub const Command = enum {
     regex_search,
     project_search,
     toggle_comment,
+    duplicate_line,
+    move_line_up,
+    move_line_down,
     move_left,
     move_right,
     move_up,
@@ -48,6 +51,10 @@ pub const Command = enum {
     lsp_definition,
     lsp_references,
     lsp_jump_back,
+    add_cursor_next_occurrence,
+    add_cursor_all_occurrences,
+    occurrence_next,
+    occurrence_prev,
     toggle_debug_panel,
     toggle_line_numbers,
 };
@@ -66,14 +73,18 @@ pub fn mapEditor(event: KeyEvent) ?Command {
         .shift_right => .select_right,
         .shift_up => .select_up,
         .shift_down => .select_down,
+        .alt_shift_left => .block_select_left,
+        .alt_shift_right => .block_select_right,
+        .alt_shift_up => .block_select_up,
+        .alt_shift_down => .block_select_down,
         .shift_home => .select_home,
         .shift_end => .select_end,
         .shift_page_up => .select_page_up,
         .shift_page_down => .select_page_down,
         .alt_left => .block_select_left,
         .alt_right => .block_select_right,
-        .alt_up => .block_select_up,
-        .alt_down => .block_select_down,
+        .alt_up => .move_line_up,
+        .alt_down => .move_line_down,
         .word_left => .word_left,
         .word_right => .word_right,
         .backspace => .backspace,
@@ -94,7 +105,7 @@ pub fn mapEditor(event: KeyEvent) ?Command {
             'y' => .redo,
             'n' => .lsp_completion,
             't' => .lsp_hover,
-            'd' => .lsp_definition,
+            'd' => .duplicate_line,
             'r' => .lsp_references,
             'o' => .lsp_jump_back,
             'w' => .toggle_debug_panel,
@@ -107,9 +118,12 @@ pub fn mapEditor(event: KeyEvent) ?Command {
         .ctrl_shift => |ch| switch (ch) {
             'p' => .show_command_palette,
             'f' => .project_search,
+            'd' => .lsp_definition,
             'k' => .add_cursor_up,
             'j' => .add_cursor_down,
             'm' => .clear_multi_cursor,
+            'n' => .occurrence_next,
+            'b' => .occurrence_prev,
             else => null,
         },
         .cmd => |ch| switch (ch) {
@@ -121,6 +135,7 @@ pub fn mapEditor(event: KeyEvent) ?Command {
             'p' => .show_file_finder,
             'g' => .goto_line,
             'f' => .regex_search,
+            'd' => .add_cursor_next_occurrence,
             'z' => .undo,
             'y' => .redo,
             'w' => .toggle_debug_panel,
@@ -130,9 +145,13 @@ pub fn mapEditor(event: KeyEvent) ?Command {
         .cmd_shift => |ch| switch (ch) {
             'p' => .show_command_palette,
             'f' => .project_search,
+            'd' => .lsp_definition,
+            'l' => .add_cursor_all_occurrences,
             'k' => .add_cursor_up,
             'j' => .add_cursor_down,
             'm' => .clear_multi_cursor,
+            'n' => .occurrence_next,
+            'b' => .occurrence_prev,
             else => null,
         },
         else => null,
@@ -149,4 +168,22 @@ test "maps multi-cursor shortcuts on cmd+shift" {
     try std.testing.expectEqual(@as(?Command, .add_cursor_up), mapEditor(.{ .cmd_shift = 'k' }));
     try std.testing.expectEqual(@as(?Command, .add_cursor_down), mapEditor(.{ .cmd_shift = 'j' }));
     try std.testing.expectEqual(@as(?Command, .clear_multi_cursor), mapEditor(.{ .cmd_shift = 'm' }));
+}
+
+test "maps line move and duplicate shortcuts" {
+    try std.testing.expectEqual(@as(?Command, .move_line_up), mapEditor(.alt_up));
+    try std.testing.expectEqual(@as(?Command, .move_line_down), mapEditor(.alt_down));
+    try std.testing.expectEqual(@as(?Command, .duplicate_line), mapEditor(.{ .ctrl = 'd' }));
+}
+
+test "maps occurrence shortcuts" {
+    try std.testing.expectEqual(@as(?Command, .add_cursor_next_occurrence), mapEditor(.{ .cmd = 'd' }));
+    try std.testing.expectEqual(@as(?Command, .occurrence_next), mapEditor(.{ .ctrl_shift = 'n' }));
+    try std.testing.expectEqual(@as(?Command, .occurrence_prev), mapEditor(.{ .ctrl_shift = 'b' }));
+    try std.testing.expectEqual(@as(?Command, .add_cursor_all_occurrences), mapEditor(.{ .cmd_shift = 'l' }));
+}
+
+test "remaps lsp definition away from ctrl+d" {
+    try std.testing.expectEqual(@as(?Command, .duplicate_line), mapEditor(.{ .ctrl = 'd' }));
+    try std.testing.expectEqual(@as(?Command, .lsp_definition), mapEditor(.{ .ctrl_shift = 'd' }));
 }

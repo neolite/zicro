@@ -22,6 +22,10 @@ pub const KeyEvent = union(enum) {
     shift_down,
     shift_left,
     shift_right,
+    alt_shift_up,
+    alt_shift_down,
+    alt_shift_left,
+    alt_shift_right,
     alt_up,
     alt_down,
     alt_left,
@@ -36,6 +40,23 @@ pub const KeyEvent = union(enum) {
     shift_page_down,
     word_left,
     word_right,
+    scroll_up,
+    scroll_down,
+    pointer_down: struct {
+        row: usize,
+        col: usize,
+        shift: bool,
+    },
+    pointer_drag: struct {
+        row: usize,
+        col: usize,
+        shift: bool,
+    },
+    pointer_up: struct {
+        row: usize,
+        col: usize,
+        shift: bool,
+    },
     alt_click: struct {
         row: usize,
         col: usize,
@@ -137,11 +158,7 @@ pub const Terminal = struct {
                     if (mapKey(key)) |mapped| return mapped;
                 },
                 .mouse => |mouse| {
-                    if (mouse.type == .press and mouse.button == .left and mouse.mods.alt) {
-                        const row: usize = if (mouse.row < 0) 0 else @intCast(mouse.row);
-                        const col: usize = if (mouse.col < 0) 0 else @intCast(mouse.col);
-                        return .{ .alt_click = .{ .row = row, .col = col } };
-                    }
+                    if (mapMouse(mouse)) |mapped| return mapped;
                 },
             }
         }
@@ -167,6 +184,10 @@ fn mapKey(key: vaxis.Key) ?KeyEvent {
     if (key.matches(vaxis.Key.down, .{})) return .down;
     if (key.matches(vaxis.Key.left, .{})) return .left;
     if (key.matches(vaxis.Key.right, .{})) return .right;
+    if (key.matches(vaxis.Key.up, .{ .shift = true, .alt = true })) return .alt_shift_up;
+    if (key.matches(vaxis.Key.down, .{ .shift = true, .alt = true })) return .alt_shift_down;
+    if (key.matches(vaxis.Key.left, .{ .shift = true, .alt = true })) return .alt_shift_left;
+    if (key.matches(vaxis.Key.right, .{ .shift = true, .alt = true })) return .alt_shift_right;
     if (key.matches(vaxis.Key.up, .{ .shift = true })) return .shift_up;
     if (key.matches(vaxis.Key.down, .{ .shift = true })) return .shift_down;
     if (key.matches(vaxis.Key.left, .{ .shift = true })) return .shift_left;
@@ -280,6 +301,10 @@ fn mapLegacyEscSequence(text: []const u8) ?KeyEvent {
     if (std.mem.eql(u8, text, "\x1b[1;3B")) return .alt_down;
     if (std.mem.eql(u8, text, "\x1b[1;3C")) return .alt_right;
     if (std.mem.eql(u8, text, "\x1b[1;3D")) return .alt_left;
+    if (std.mem.eql(u8, text, "\x1b[1;4A")) return .alt_shift_up;
+    if (std.mem.eql(u8, text, "\x1b[1;4B")) return .alt_shift_down;
+    if (std.mem.eql(u8, text, "\x1b[1;4C")) return .alt_shift_right;
+    if (std.mem.eql(u8, text, "\x1b[1;4D")) return .alt_shift_left;
 
     if (std.mem.eql(u8, text, "\x1b[1;2A")) return .shift_up;
     if (std.mem.eql(u8, text, "\x1b[1;2B")) return .shift_down;
@@ -319,4 +344,73 @@ fn isCsiTail(ch: u8) bool {
         'A', 'B', 'C', 'D', 'H', 'F', 'P', 'Q', 'R', 'S', '~', 'u' => true,
         else => false,
     };
+}
+
+fn mapMouse(mouse: vaxis.Mouse) ?KeyEvent {
+    const row: usize = if (mouse.row < 0) 0 else @intCast(mouse.row);
+    const col: usize = if (mouse.col < 0) 0 else @intCast(mouse.col);
+
+    if (mouse.type == .press and mouse.button == .wheel_up) return .scroll_up;
+    if (mouse.type == .press and mouse.button == .wheel_down) return .scroll_down;
+
+    const shift = mouse.mods.shift;
+    if (mouse.type == .press and mouse.button == .left and mouse.mods.alt) {
+        return .{ .alt_click = .{ .row = row, .col = col } };
+    }
+    if (mouse.type == .press and mouse.button == .left and !mouse.mods.alt) {
+        return .{ .pointer_down = .{ .row = row, .col = col, .shift = shift } };
+    }
+    if ((mouse.type == .drag and mouse.button == .left) or (mouse.type == .motion and mouse.button == .left)) {
+        return .{ .pointer_drag = .{ .row = row, .col = col, .shift = shift } };
+    }
+    if (mouse.type == .release and (mouse.button == .left or mouse.button == .none)) {
+        return .{ .pointer_up = .{ .row = row, .col = col, .shift = shift } };
+    }
+    return null;
+}
+
+test "legacy escape parser maps alt arrows" {
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_up), mapLegacyEscSequence("\x1b[1;3A"));
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_down), mapLegacyEscSequence("\x1b[1;3B"));
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_left), mapLegacyEscSequence("\x1b[1;3D"));
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_right), mapLegacyEscSequence("\x1b[1;3C"));
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_shift_up), mapLegacyEscSequence("\x1b[1;4A"));
+    try std.testing.expectEqual(@as(?KeyEvent, .alt_shift_down), mapLegacyEscSequence("\x1b[1;4B"));
+}
+
+test "control-text detector filters ansi payloads from text input" {
+    try std.testing.expect(isLikelyControlText("\x1b[1;3B"));
+    try std.testing.expect(isLikelyControlText("[1;3B"));
+    try std.testing.expect(!isLikelyControlText("normal text"));
+}
+
+test "mouse wheel maps to scroll events" {
+    const wheel_up = vaxis.Mouse{
+        .row = 10,
+        .col = 4,
+        .button = .wheel_up,
+        .mods = .{},
+        .type = .press,
+    };
+    const wheel_down = vaxis.Mouse{
+        .row = 10,
+        .col = 4,
+        .button = .wheel_down,
+        .mods = .{},
+        .type = .press,
+    };
+    try std.testing.expectEqual(@as(?KeyEvent, .scroll_up), mapMouse(wheel_up));
+    try std.testing.expectEqual(@as(?KeyEvent, .scroll_down), mapMouse(wheel_down));
+}
+
+test "alt-click maps to multi-cursor click event" {
+    const event = vaxis.Mouse{
+        .row = 7,
+        .col = 9,
+        .button = .left,
+        .mods = .{ .alt = true },
+        .type = .press,
+    };
+    const mapped = mapMouse(event).?;
+    try std.testing.expectEqual(@as(KeyEvent, .{ .alt_click = .{ .row = 7, .col = 9 } }), mapped);
 }
