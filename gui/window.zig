@@ -95,7 +95,6 @@ pub fn main() !void {
     // Editor state
     var cursor_line: usize = 0;
     var cursor_col: usize = 0;
-    var scroll_y: usize = 0;
     var cursor_blink_timer: u32 = 0;
     var cursor_visible = true;
 
