@@ -95,6 +95,7 @@ pub fn main() !void {
     // Editor state
     var cursor_line: usize = 0;
     var cursor_col: usize = 0;
+    var scroll_offset: usize = 0;
     var cursor_blink_timer: u32 = 0;
     var cursor_visible = true;
 
@@ -115,6 +116,10 @@ pub fn main() !void {
                         c.SDLK_UP => {
                             if (cursor_line > 0) {
                                 cursor_line -= 1;
+                                // Auto-scroll up if cursor goes above visible area
+                                if (cursor_line < scroll_offset) {
+                                    scroll_offset = cursor_line;
+                                }
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
                             }
@@ -122,6 +127,11 @@ pub fn main() !void {
                         c.SDLK_DOWN => {
                             if (cursor_line + 1 < line_count) {
                                 cursor_line += 1;
+                                // Auto-scroll down if cursor goes below visible area
+                                const visible_lines: usize = 30;
+                                if (cursor_line >= scroll_offset + visible_lines) {
+                                    scroll_offset = cursor_line - visible_lines + 1;
+                                }
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
                             }
@@ -239,6 +249,22 @@ pub fn main() !void {
                         cursor_visible = true;
                     }
                 },
+                c.SDL_MOUSEWHEEL => {
+                    const total_lines = buffer.lineCount();
+                    const visible_lines: usize = 30;
+
+                    if (event.wheel.y > 0) {
+                        // Scroll up
+                        if (scroll_offset > 0) {
+                            scroll_offset -= 1;
+                        }
+                    } else if (event.wheel.y < 0) {
+                        // Scroll down
+                        if (scroll_offset + visible_lines < total_lines) {
+                            scroll_offset += 1;
+                        }
+                    }
+                },
                 else => {},
             }
         }
@@ -259,12 +285,13 @@ pub fn main() !void {
 
         // Render text from buffer
         const line_count = buffer.lineCount();
-        const visible_lines = @min(line_count, 30);
+        const visible_lines = @min(line_count - scroll_offset, 30);
 
         var line_y: i32 = 70;
         var i: usize = 0;
         while (i < visible_lines) : (i += 1) {
-            const line = buffer.lineOwned(allocator, i) catch continue;
+            const line_index = scroll_offset + i;
+            const line = buffer.lineOwned(allocator, line_index) catch continue;
             defer allocator.free(line);
 
             if (line.len == 0) {
@@ -274,7 +301,7 @@ pub fn main() !void {
 
             // Render line number
             var line_num_buf: [16]u8 = undefined;
-            const line_num_str = std.fmt.bufPrintZ(&line_num_buf, "{d:4}", .{i + 1}) catch continue;
+            const line_num_str = std.fmt.bufPrintZ(&line_num_buf, "{d:4}", .{line_index + 1}) catch continue;
 
             const line_num_color = c.SDL_Color{ .r = 100, .g = 100, .b = 100, .a = 255 };
             const line_num_surface = c.TTF_RenderText_Solid(font, line_num_str.ptr, line_num_color) orelse continue;
@@ -320,9 +347,10 @@ pub fn main() !void {
             cursor_visible = !cursor_visible;
         }
 
-        if (cursor_visible and cursor_line < visible_lines) {
+        if (cursor_visible and cursor_line >= scroll_offset and cursor_line < scroll_offset + 30) {
+            const cursor_screen_line = cursor_line - scroll_offset;
             const cursor_x = 80 + @as(i32, @intCast(cursor_col * 8));
-            const cursor_y = 70 + @as(i32, @intCast(cursor_line * 20));
+            const cursor_y = 70 + @as(i32, @intCast(cursor_screen_line * 20));
 
             _ = c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             const cursor_rect = c.SDL_Rect{
