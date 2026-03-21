@@ -154,7 +154,65 @@ pub fn main() !void {
                             cursor_blink_timer = 0;
                             cursor_visible = true;
                         },
+                        c.SDLK_BACKSPACE => {
+                            if (cursor_col > 0) {
+                                const line = buffer.lineOwned(allocator, cursor_line) catch continue;
+                                defer allocator.free(line);
+
+                                const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                                const delete_offset = line_start + cursor_col - 1;
+
+                                buffer.delete(delete_offset, 1) catch {};
+                                cursor_col -= 1;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            } else if (cursor_line > 0) {
+                                // Join with previous line
+                                const prev_line = buffer.lineOwned(allocator, cursor_line - 1) catch continue;
+                                defer allocator.free(prev_line);
+
+                                const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                                buffer.delete(line_start - 1, 1) catch {};
+
+                                cursor_line -= 1;
+                                cursor_col = prev_line.len;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_DELETE => {
+                            const line = buffer.lineOwned(allocator, cursor_line) catch continue;
+                            defer allocator.free(line);
+
+                            if (cursor_col < line.len) {
+                                const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                                const delete_offset = line_start + cursor_col;
+                                buffer.delete(delete_offset, 1) catch {};
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_RETURN => {
+                            const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                            const insert_offset = line_start + cursor_col;
+                            buffer.insert(insert_offset, "\n") catch {};
+                            cursor_line += 1;
+                            cursor_col = 0;
+                            cursor_blink_timer = 0;
+                            cursor_visible = true;
+                        },
                         else => {},
+                    }
+                },
+                c.SDL_TEXTINPUT => {
+                    const text = std.mem.sliceTo(&event.text.text, 0);
+                    if (text.len > 0) {
+                        const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                        const insert_offset = line_start + cursor_col;
+                        buffer.insert(insert_offset, text) catch {};
+                        cursor_col += text.len;
+                        cursor_blink_timer = 0;
+                        cursor_visible = true;
                     }
                 },
                 else => {},
