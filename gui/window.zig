@@ -108,7 +108,7 @@ pub fn main() !void {
     var selection_start_col: usize = 0;
 
     // File state
-    var file_path: ?[]const u8 = null;
+    const file_path: ?[]const u8 = null;
     var file_modified = false;
 
     // Main loop
