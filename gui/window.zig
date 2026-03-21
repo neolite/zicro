@@ -328,6 +328,60 @@ pub fn main() !void {
                 continue;
             }
 
+            // Calculate selection range for this line
+            var sel_start_col: ?usize = null;
+            var sel_end_col: ?usize = null;
+
+            if (selection_active) {
+                const sel_min_line = @min(selection_start_line, cursor_line);
+                const sel_max_line = @max(selection_start_line, cursor_line);
+
+                if (line_index >= sel_min_line and line_index <= sel_max_line) {
+                    if (sel_min_line == sel_max_line) {
+                        // Single line selection
+                        const min_col = @min(selection_start_col, cursor_col);
+                        const max_col = @max(selection_start_col, cursor_col);
+                        sel_start_col = min_col;
+                        sel_end_col = max_col;
+                    } else if (line_index == sel_min_line) {
+                        // First line of multi-line selection
+                        if (selection_start_line < cursor_line) {
+                            sel_start_col = selection_start_col;
+                            sel_end_col = line.len;
+                        } else {
+                            sel_start_col = cursor_col;
+                            sel_end_col = line.len;
+                        }
+                    } else if (line_index == sel_max_line) {
+                        // Last line of multi-line selection
+                        sel_start_col = 0;
+                        if (selection_start_line < cursor_line) {
+                            sel_end_col = cursor_col;
+                        } else {
+                            sel_end_col = selection_start_col;
+                        }
+                    } else {
+                        // Middle line - fully selected
+                        sel_start_col = 0;
+                        sel_end_col = line.len;
+                    }
+                }
+            }
+
+            // Render selection highlight if applicable
+            if (sel_start_col != null and sel_end_col != null) {
+                const start_x = 80 + @as(i32, @intCast(sel_start_col.? * 8));
+                const width = @as(i32, @intCast((sel_end_col.? - sel_start_col.?) * 8));
+                _ = c.SDL_SetRenderDrawColor(renderer, 60, 100, 180, 255);
+                const sel_rect = c.SDL_Rect{
+                    .x = start_x,
+                    .y = line_y,
+                    .w = width,
+                    .h = 18
+                };
+                _ = c.SDL_RenderFillRect(renderer, &sel_rect);
+            }
+
             // Render line number
             var line_num_buf: [16]u8 = undefined;
             const line_num_str = std.fmt.bufPrintZ(&line_num_buf, "{d:4}", .{line_index + 1}) catch continue;
