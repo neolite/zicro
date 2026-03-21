@@ -92,6 +92,13 @@ pub fn main() !void {
     std.log.info("Zicro GUI window opened!", .{});
     std.log.info("Buffer has {d} lines", .{buffer.lineCount()});
 
+    // Editor state
+    var cursor_line: usize = 0;
+    var cursor_col: usize = 0;
+    var scroll_y: usize = 0;
+    var cursor_blink_timer: u32 = 0;
+    var cursor_visible = true;
+
     // Main loop
     var running = true;
     var event: c.SDL_Event = undefined;
@@ -101,8 +108,54 @@ pub fn main() !void {
             switch (event.type) {
                 c.SDL_QUIT => running = false,
                 c.SDL_KEYDOWN => {
-                    if (event.key.keysym.sym == c.SDLK_ESCAPE or event.key.keysym.sym == c.SDLK_q) {
-                        running = false;
+                    const key = event.key.keysym.sym;
+                    const line_count = buffer.lineCount();
+
+                    switch (key) {
+                        c.SDLK_ESCAPE, c.SDLK_q => running = false,
+                        c.SDLK_UP => {
+                            if (cursor_line > 0) {
+                                cursor_line -= 1;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_DOWN => {
+                            if (cursor_line + 1 < line_count) {
+                                cursor_line += 1;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_LEFT => {
+                            if (cursor_col > 0) {
+                                cursor_col -= 1;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_RIGHT => {
+                            const line = buffer.lineOwned(allocator, cursor_line) catch &[_]u8{};
+                            defer if (line.len > 0) allocator.free(line);
+                            if (cursor_col < line.len) {
+                                cursor_col += 1;
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
+                        c.SDLK_HOME => {
+                            cursor_col = 0;
+                            cursor_blink_timer = 0;
+                            cursor_visible = true;
+                        },
+                        c.SDLK_END => {
+                            const line = buffer.lineOwned(allocator, cursor_line) catch &[_]u8{};
+                            defer if (line.len > 0) allocator.free(line);
+                            cursor_col = line.len;
+                            cursor_blink_timer = 0;
+                            cursor_visible = true;
+                        },
+                        else => {},
                     }
                 },
                 else => {},
@@ -177,6 +230,27 @@ pub fn main() !void {
             _ = c.SDL_RenderCopy(renderer, text_texture, null, &text_rect);
 
             line_y += 20;
+        }
+
+        // Render cursor
+        cursor_blink_timer += 16;
+        if (cursor_blink_timer >= 500) {
+            cursor_blink_timer = 0;
+            cursor_visible = !cursor_visible;
+        }
+
+        if (cursor_visible and cursor_line < visible_lines) {
+            const cursor_x = 80 + @as(i32, @intCast(cursor_col * 8));
+            const cursor_y = 70 + @as(i32, @intCast(cursor_line * 20));
+
+            _ = c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            const cursor_rect = c.SDL_Rect{
+                .x = cursor_x,
+                .y = cursor_y,
+                .w = 2,
+                .h = 18
+            };
+            _ = c.SDL_RenderFillRect(renderer, &cursor_rect);
         }
 
         // Draw status bar
