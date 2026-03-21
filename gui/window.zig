@@ -212,9 +212,9 @@ pub fn main() !void {
                                     buffer.undo() catch {};
                                 }
                                 // Reset cursor to safe position
-                                const line_count = buffer.lineCount();
-                                if (cursor_line >= line_count) {
-                                    cursor_line = if (line_count > 0) line_count - 1 else 0;
+                                const total_lines = buffer.lineCount();
+                                if (cursor_line >= total_lines) {
+                                    cursor_line = if (total_lines > 0) total_lines - 1 else 0;
                                 }
                                 const line = buffer.lineOwned(allocator, cursor_line) catch &[_]u8{};
                                 defer if (line.len > 0) allocator.free(line);
