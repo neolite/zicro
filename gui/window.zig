@@ -107,6 +107,10 @@ pub fn main() !void {
     var selection_start_line: usize = 0;
     var selection_start_col: usize = 0;
 
+    // File state
+    var file_path: ?[]const u8 = null;
+    var file_modified = false;
+
     // Main loop
     var running = true;
     var event: c.SDL_Event = undefined;
@@ -384,6 +388,33 @@ pub fn main() !void {
                                 }
                             }
                         },
+                        c.SDLK_s => {
+                            if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
+                                // Save: Cmd+S or Ctrl+S
+                                if (file_path) |path| {
+                                    // Save to existing file
+                                    const file = std.fs.cwd().createFile(path, .{}) catch {
+                                        std.log.err("Failed to save file: {s}", .{path});
+                                        continue;
+                                    };
+                                    defer file.close();
+
+                                    const total_lines = buffer.lineCount();
+                                    var line_idx: usize = 0;
+                                    while (line_idx < total_lines) : (line_idx += 1) {
+                                        const line = buffer.lineOwned(allocator, line_idx) catch continue;
+                                        defer allocator.free(line);
+                                        file.writeAll(line) catch {};
+                                        if (line_idx + 1 < total_lines) {
+                                            file.writeAll("\n") catch {};
+                                        }
+                                    }
+
+                                    file_modified = false;
+                                    std.log.info("Saved: {s}", .{path});
+                                }
+                            }
+                        },
                         c.SDLK_z => {
                             if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
                                 if ((mods & c.KMOD_SHIFT) != 0) {
@@ -419,6 +450,7 @@ pub fn main() !void {
                         cursor_col += text.len;
                         cursor_blink_timer = 0;
                         cursor_visible = true;
+                        file_modified = true;
                     }
                 },
                 c.SDL_MOUSEWHEEL => {
@@ -579,7 +611,11 @@ pub fn main() !void {
 
         // Render status text
         var status_buf: [256]u8 = undefined;
-        const status_text = std.fmt.bufPrintZ(&status_buf, "Line {d}, Col {d} | {d} lines | {s}", .{
+        const modified_indicator = if (file_modified) "*" else "";
+        const file_name = if (file_path) |path| std.fs.path.basename(path) else "[No Name]";
+        const status_text = std.fmt.bufPrintZ(&status_buf, "{s}{s} | Line {d}, Col {d} | {d} lines | {s}", .{
+            file_name,
+            modified_indicator,
             cursor_line + 1,
             cursor_col + 1,
             buffer.lineCount(),
