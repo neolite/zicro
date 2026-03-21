@@ -91,4 +91,28 @@ pub fn build(b: *std.Build) void {
     }
     const run_gui_step = b.step("run-gui", "Run zicro GUI demo");
     run_gui_step.dependOn(&run_gui_cmd.step);
+
+    // SDL2 GUI window (real window)
+    const gui_window_mod = b.createModule(.{
+        .root_source_file = b.path("gui/window.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gui_window_mod.addImport("core", core_mod);
+
+    const gui_window_exe = b.addExecutable(.{
+        .name = "zicro-gui-window",
+        .root_module = gui_window_mod,
+    });
+    gui_window_exe.linkLibC();
+    gui_window_exe.linkSystemLibrary("SDL2");
+
+    b.installArtifact(gui_window_exe);
+
+    const run_gui_window_cmd = b.addRunArtifact(gui_window_exe);
+    if (b.args) |args| {
+        run_gui_window_cmd.addArgs(args);
+    }
+    const run_gui_window_step = b.step("run-gui-window", "Run zicro GUI window (SDL2)");
+    run_gui_window_step.dependOn(&run_gui_window_cmd.step);
 }
