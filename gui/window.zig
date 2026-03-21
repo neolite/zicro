@@ -201,6 +201,30 @@ pub fn main() !void {
                             cursor_blink_timer = 0;
                             cursor_visible = true;
                         },
+                        c.SDLK_z => {
+                            const mods = c.SDL_GetModState();
+                            if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
+                                if ((mods & c.KMOD_SHIFT) != 0) {
+                                    // Redo: Cmd+Shift+Z or Ctrl+Shift+Z
+                                    buffer.redo() catch {};
+                                } else {
+                                    // Undo: Cmd+Z or Ctrl+Z
+                                    buffer.undo() catch {};
+                                }
+                                // Reset cursor to safe position
+                                const line_count = buffer.lineCount();
+                                if (cursor_line >= line_count) {
+                                    cursor_line = if (line_count > 0) line_count - 1 else 0;
+                                }
+                                const line = buffer.lineOwned(allocator, cursor_line) catch &[_]u8{};
+                                defer if (line.len > 0) allocator.free(line);
+                                if (cursor_col > line.len) {
+                                    cursor_col = line.len;
+                                }
+                                cursor_blink_timer = 0;
+                                cursor_visible = true;
+                            }
+                        },
                         else => {},
                     }
                 },
