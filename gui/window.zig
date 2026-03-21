@@ -52,12 +52,33 @@ pub fn main() !void {
     defer buffer.deinit();
 
     const demo_text =
-        \\// Zicro GUI - Real Window Demo
+        \\// Zicro GUI - Real Window Demo with Text Rendering!
         \\const std = @import("std");
+        \\const core = @import("core");
         \\
         \\pub fn main() !void {
-        \\    std.debug.print("Hello from Zicro GUI!\n", .{});
+        \\    var buffer = try core.Buffer.initEmpty(allocator);
+        \\    defer buffer.deinit();
+        \\
+        \\    try buffer.insert(0, "Hello from Zicro GUI!");
+        \\    std.debug.print("Buffer: {s}\n", .{buffer.bytes()});
         \\}
+        \\
+        \\// This GUI window demonstrates:
+        \\// - SDL2 window creation (1200x800)
+        \\// - SDL2_ttf text rendering
+        \\// - Monaco monospace font
+        \\// - Line numbers + code display
+        \\// - Integration with zicro-core buffer
+        \\// - 60 FPS rendering loop
+        \\//
+        \\// Next features to add:
+        \\// - Keyboard input handling
+        \\// - Cursor rendering and movement
+        \\// - Text editing (insert/delete)
+        \\// - Scrolling (mouse wheel + arrow keys)
+        \\// - Syntax highlighting colors
+        \\// - LSP integration UI
     ;
     try buffer.insert(0, demo_text);
 
