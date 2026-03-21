@@ -7,6 +7,9 @@ const c = @cImport({
     @cInclude("SDL2/SDL_ttf.h");
 });
 
+const WINDOW_WIDTH = 1200;
+const WINDOW_HEIGHT = 800;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -28,11 +31,11 @@ pub fn main() !void {
 
     // Create window
     const window = c.SDL_CreateWindow(
-        "Zicro GUI - Proof of Concept",
+        "Zicro GUI Editor",
         c.SDL_WINDOWPOS_CENTERED,
         c.SDL_WINDOWPOS_CENTERED,
-        1200,
-        800,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
         c.SDL_WINDOW_SHOWN | c.SDL_WINDOW_RESIZABLE,
     ) orelse {
         std.log.err("SDL_CreateWindow failed: {s}", .{c.SDL_GetError()});
@@ -562,6 +565,49 @@ pub fn main() !void {
 
             line_y += 20;
         }
+
+        // Draw status bar
+        const status_y = 760;
+        _ = c.SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
+        const status_rect = c.SDL_Rect{
+            .x = 0,
+            .y = status_y,
+            .w = WINDOW_WIDTH,
+            .h = 40
+        };
+        _ = c.SDL_RenderFillRect(renderer, &status_rect);
+
+        // Render status text
+        var status_buf: [256]u8 = undefined;
+        const status_text = std.fmt.bufPrintZ(&status_buf, "Line {d}, Col {d} | {d} lines | {s}", .{
+            cursor_line + 1,
+            cursor_col + 1,
+            buffer.lineCount(),
+            if (selection_active) "SELECTING" else "NORMAL"
+        }) catch "Status";
+
+        const status_color = c.SDL_Color{ .r = 200, .g = 200, .b = 200, .a = 255 };
+        const status_surface = c.TTF_RenderText_Solid(font, status_text.ptr, status_color) orelse {
+            c.SDL_RenderPresent(renderer);
+            c.SDL_Delay(16);
+            continue;
+        };
+        defer c.SDL_FreeSurface(status_surface);
+
+        const status_texture = c.SDL_CreateTextureFromSurface(renderer, status_surface) orelse {
+            c.SDL_RenderPresent(renderer);
+            c.SDL_Delay(16);
+            continue;
+        };
+        defer c.SDL_DestroyTexture(status_texture);
+
+        const status_text_rect = c.SDL_Rect{
+            .x = 10,
+            .y = status_y + 10,
+            .w = status_surface.*.w,
+            .h = status_surface.*.h
+        };
+        _ = c.SDL_RenderCopy(renderer, status_texture, null, &status_text_rect);
 
         // Render cursor
         cursor_blink_timer += 16;
