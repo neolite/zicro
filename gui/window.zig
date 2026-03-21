@@ -667,11 +667,6 @@ pub fn main() !void {
             _ = c.SDL_RenderFillRect(renderer, &cursor_rect);
         }
 
-        // Draw status bar
-        _ = c.SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-        const status_rect = c.SDL_Rect{ .x = 0, .y = 760, .w = 1200, .h = 40 };
-        _ = c.SDL_RenderFillRect(renderer, &status_rect);
-
         c.SDL_RenderPresent(renderer);
         c.SDL_Delay(16); // ~60 FPS
     }
