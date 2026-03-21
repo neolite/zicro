@@ -99,6 +99,11 @@ pub fn main() !void {
     var cursor_blink_timer: u32 = 0;
     var cursor_visible = true;
 
+    // Selection state
+    var selection_active = false;
+    var selection_start_line: usize = 0;
+    var selection_start_col: usize = 0;
+
     // Main loop
     var running = true;
     var event: c.SDL_Event = undefined;
@@ -110,6 +115,15 @@ pub fn main() !void {
                 c.SDL_KEYDOWN => {
                     const key = event.key.keysym.sym;
                     const line_count = buffer.lineCount();
+                    const mods = c.SDL_GetModState();
+                    const shift_pressed = (mods & c.KMOD_SHIFT) != 0;
+
+                    // Start selection if shift is pressed and not already selecting
+                    if (shift_pressed and !selection_active) {
+                        selection_active = true;
+                        selection_start_line = cursor_line;
+                        selection_start_col = cursor_col;
+                    }
 
                     switch (key) {
                         c.SDLK_ESCAPE, c.SDLK_q => running = false,
@@ -123,6 +137,10 @@ pub fn main() !void {
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
                             }
+                            // Clear selection if shift not pressed
+                            if (!shift_pressed) {
+                                selection_active = false;
+                            }
                         },
                         c.SDLK_DOWN => {
                             if (cursor_line + 1 < line_count) {
@@ -135,12 +153,20 @@ pub fn main() !void {
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
                             }
+                            // Clear selection if shift not pressed
+                            if (!shift_pressed) {
+                                selection_active = false;
+                            }
                         },
                         c.SDLK_LEFT => {
                             if (cursor_col > 0) {
                                 cursor_col -= 1;
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
+                            }
+                            // Clear selection if shift not pressed
+                            if (!shift_pressed) {
+                                selection_active = false;
                             }
                         },
                         c.SDLK_RIGHT => {
@@ -150,6 +176,10 @@ pub fn main() !void {
                                 cursor_col += 1;
                                 cursor_blink_timer = 0;
                                 cursor_visible = true;
+                            }
+                            // Clear selection if shift not pressed
+                            if (!shift_pressed) {
+                                selection_active = false;
                             }
                         },
                         c.SDLK_HOME => {
@@ -212,7 +242,6 @@ pub fn main() !void {
                             cursor_visible = true;
                         },
                         c.SDLK_z => {
-                            const mods = c.SDL_GetModState();
                             if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
                                 if ((mods & c.KMOD_SHIFT) != 0) {
                                     // Redo: Cmd+Shift+Z or Ctrl+Shift+Z
