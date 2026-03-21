@@ -599,15 +599,15 @@ pub fn main() !void {
         }
 
         // Draw status bar
-        const status_y = 760;
+        const status_bar_y = 760;
         _ = c.SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-        const status_rect = c.SDL_Rect{
+        const status_bar_rect = c.SDL_Rect{
             .x = 0,
-            .y = status_y,
+            .y = status_bar_y,
             .w = WINDOW_WIDTH,
             .h = 40
         };
-        _ = c.SDL_RenderFillRect(renderer, &status_rect);
+        _ = c.SDL_RenderFillRect(renderer, &status_bar_rect);
 
         // Render status text
         var status_buf: [256]u8 = undefined;
@@ -639,7 +639,7 @@ pub fn main() !void {
 
         const status_text_rect = c.SDL_Rect{
             .x = 10,
-            .y = status_y + 10,
+            .y = status_bar_y + 10,
             .w = status_surface.*.w,
             .h = status_surface.*.h
         };
