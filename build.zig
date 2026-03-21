@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
     });
     gui_window_exe.linkLibC();
     gui_window_exe.linkSystemLibrary("SDL2");
+    gui_window_exe.linkSystemLibrary("SDL2_ttf");
 
     b.installArtifact(gui_window_exe);
 
