@@ -241,6 +241,146 @@ pub fn main() !void {
                             cursor_blink_timer = 0;
                             cursor_visible = true;
                         },
+                        c.SDLK_c => {
+                            if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
+                                // Copy: Cmd+C or Ctrl+C
+                                if (selection_active) {
+                                    const sel_min_line = @min(selection_start_line, cursor_line);
+                                    const sel_max_line = @max(selection_start_line, cursor_line);
+
+                                    var selected_text = std.array_list.Managed(u8).init(allocator);
+                                    defer selected_text.deinit();
+
+                                    var line_idx = sel_min_line;
+                                    while (line_idx <= sel_max_line) : (line_idx += 1) {
+                                        const line = buffer.lineOwned(allocator, line_idx) catch continue;
+                                        defer allocator.free(line);
+
+                                        if (sel_min_line == sel_max_line) {
+                                            // Single line
+                                            const min_col = @min(selection_start_col, cursor_col);
+                                            const max_col = @max(selection_start_col, cursor_col);
+                                            const text = line[min_col..@min(max_col, line.len)];
+                                            selected_text.appendSlice(text) catch {};
+                                        } else if (line_idx == sel_min_line) {
+                                            // First line
+                                            const start_col = if (selection_start_line < cursor_line) selection_start_col else cursor_col;
+                                            selected_text.appendSlice(line[start_col..]) catch {};
+                                            selected_text.append('\n') catch {};
+                                        } else if (line_idx == sel_max_line) {
+                                            // Last line
+                                            const end_col = if (selection_start_line < cursor_line) cursor_col else selection_start_col;
+                                            selected_text.appendSlice(line[0..@min(end_col, line.len)]) catch {};
+                                        } else {
+                                            // Middle line
+                                            selected_text.appendSlice(line) catch {};
+                                            selected_text.append('\n') catch {};
+                                        }
+                                    }
+
+                                    const text_z = allocator.dupeZ(u8, selected_text.items) catch continue;
+                                    defer allocator.free(text_z);
+                                    _ = c.SDL_SetClipboardText(text_z.ptr);
+                                }
+                            }
+                        },
+                        c.SDLK_v => {
+                            if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
+                                // Paste: Cmd+V or Ctrl+V
+                                const clipboard_text = c.SDL_GetClipboardText();
+                                if (clipboard_text != null) {
+                                    defer c.SDL_free(clipboard_text);
+                                    const text = std.mem.sliceTo(clipboard_text, 0);
+
+                                    // Delete selection if active
+                                    if (selection_active) {
+                                        const sel_min_line = @min(selection_start_line, cursor_line);
+                                        const sel_max_line = @max(selection_start_line, cursor_line);
+                                        const sel_start = buffer.offsetFromLineCol(sel_min_line, if (selection_start_line < cursor_line) selection_start_col else cursor_col);
+                                        const sel_end = buffer.offsetFromLineCol(sel_max_line, if (selection_start_line < cursor_line) cursor_col else selection_start_col);
+                                        buffer.delete(sel_start, sel_end - sel_start) catch {};
+                                        cursor_line = sel_min_line;
+                                        cursor_col = if (selection_start_line < cursor_line) selection_start_col else cursor_col;
+                                        selection_active = false;
+                                    }
+
+                                    const line_start = buffer.offsetFromLineCol(cursor_line, 0);
+                                    const insert_offset = line_start + cursor_col;
+                                    buffer.insert(insert_offset, text) catch {};
+
+                                    // Update cursor position
+                                    var newlines: usize = 0;
+                                    var last_newline_pos: usize = 0;
+                                    for (text, 0..) |ch, idx| {
+                                        if (ch == '\n') {
+                                            newlines += 1;
+                                            last_newline_pos = idx;
+                                        }
+                                    }
+
+                                    if (newlines > 0) {
+                                        cursor_line += newlines;
+                                        cursor_col = text.len - last_newline_pos - 1;
+                                    } else {
+                                        cursor_col += text.len;
+                                    }
+
+                                    cursor_blink_timer = 0;
+                                    cursor_visible = true;
+                                }
+                            }
+                        },
+                        c.SDLK_x => {
+                            if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
+                                // Cut: Cmd+X or Ctrl+X (copy + delete)
+                                if (selection_active) {
+                                    // First copy
+                                    const sel_min_line = @min(selection_start_line, cursor_line);
+                                    const sel_max_line = @max(selection_start_line, cursor_line);
+
+                                    var selected_text = std.array_list.Managed(u8).init(allocator);
+                                    defer selected_text.deinit();
+
+                                    var line_idx = sel_min_line;
+                                    while (line_idx <= sel_max_line) : (line_idx += 1) {
+                                        const line = buffer.lineOwned(allocator, line_idx) catch continue;
+                                        defer allocator.free(line);
+
+                                        if (sel_min_line == sel_max_line) {
+                                            const min_col = @min(selection_start_col, cursor_col);
+                                            const max_col = @max(selection_start_col, cursor_col);
+                                            const text = line[min_col..@min(max_col, line.len)];
+                                            selected_text.appendSlice(text) catch {};
+                                        } else if (line_idx == sel_min_line) {
+                                            const start_col = if (selection_start_line < cursor_line) selection_start_col else cursor_col;
+                                            selected_text.appendSlice(line[start_col..]) catch {};
+                                            selected_text.append('\n') catch {};
+                                        } else if (line_idx == sel_max_line) {
+                                            const end_col = if (selection_start_line < cursor_line) cursor_col else selection_start_col;
+                                            selected_text.appendSlice(line[0..@min(end_col, line.len)]) catch {};
+                                        } else {
+                                            selected_text.appendSlice(line) catch {};
+                                            selected_text.append('\n') catch {};
+                                        }
+                                    }
+
+                                    const text_z = allocator.dupeZ(u8, selected_text.items) catch continue;
+                                    defer allocator.free(text_z);
+                                    _ = c.SDL_SetClipboardText(text_z.ptr);
+
+                                    // Then delete
+                                    const sel_start = buffer.offsetFromLineCol(sel_min_line, if (selection_start_line < cursor_line) selection_start_col else cursor_col);
+                                    const sel_end = buffer.offsetFromLineCol(sel_max_line, if (selection_start_line < cursor_line) cursor_col else selection_start_col);
+                                    buffer.delete(sel_start, sel_end - sel_start) catch {};
+
+                                    cursor_line = sel_min_line;
+                                    cursor_col = if (selection_start_line < cursor_line) selection_start_col else cursor_col;
+                                    selection_active = false;
+                                    cursor_blink_timer = 0;
+                                    cursor_visible = true;
+                                }
+                            }
+                        },
                         c.SDLK_z => {
                             if ((mods & c.KMOD_GUI) != 0 or (mods & c.KMOD_CTRL) != 0) {
                                 if ((mods & c.KMOD_SHIFT) != 0) {
